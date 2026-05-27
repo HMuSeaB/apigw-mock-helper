@@ -1,0 +1,12 @@
+# 忽略敏感书源数据与本地运行缓存
+换源app书源/
+*.json
+*.db
+.antigravity_docs/
+.venv/
+legado_server/.venv/
+__pycache__/
+legado_server/__pycache__/
+*.log
+*.tmp
+legado_server/legado.db

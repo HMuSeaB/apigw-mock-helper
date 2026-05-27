@@ -1,0 +1,5 @@
+fastapi>=0.68.0
+uvicorn>=0.15.0
+requests>=2.26.0
+pycryptodome>=3.10.1
+curl_cffi>=0.5.10
