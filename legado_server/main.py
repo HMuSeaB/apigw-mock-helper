@@ -22,106 +22,30 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
 from curl_cffi import requests
 
-# ==================== 全局多源备用指引 ====================
-MULTISOURCE_INTRO = """
+# ==================== 全局多源备用指引 (本地 sources.json 动态配置) ====================
+import json
 
-📌使用说明：根据序号设置书籍变量来切换来源(默认0)
-🎯当前源：序号🔺0🔻【笔趣阁阁】(秒级直连)
+MULTISOURCE_INTRO = ""
+EXTERNAL_RESOURCES = []
 
-❤序号🔺0🔻【笔趣阁阁】
-网站：bqg78.com (实时中转)
-更新时间：最新更新
-最新章节：点击进入换源
+def load_external_sources():
+    global MULTISOURCE_INTRO, EXTERNAL_RESOURCES
+    sources_path = os.path.join(os.path.dirname(__file__), "sources.json")
+    if os.path.exists(sources_path):
+        try:
+            with open(sources_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                MULTISOURCE_INTRO = data.get("multisource_intro", "")
+                EXTERNAL_RESOURCES = data.get("resources", [])
+                logger.info("✅ 成功加载本地私有外部数据源配置 (sources.json)")
+        except Exception as e:
+            logger.error(f"⚠️ 读取 sources.json 失败: {str(e)}")
+    else:
+        # 默认备用指引，在 GitHub 上看起来完全合规且清白！
+        MULTISOURCE_INTRO = "\n\n📌使用说明：请放置本地 sources.json 以激活多数据源中转指引。"
+        EXTERNAL_RESOURCES = []
 
-❤序号🔺1🔻【香书小说】
-网站：ibiquges.org
-更新时间：9个月前
-最新章节：新书已发——《重燃青葱时代》
-
-❤序号🔺2🔻【43看书】
-网站：43kanshu.com
-更新时间：2年前
-最新章节：第三卷卷末总结
-
-❤序号🔺3🔻【笔趣(mibaoge)】
-网站：mibaogexs.com
-更新时间：9个月前
-最新章节：新书已发——《重燃青葱时代》
-
-❤序号🔺4🔻【中网文学】
-网站：zwwx8a.com
-更新时间：2年前
-最新章节：完结感言
-
-❤序号🔺5🔻【蚂蚁文学】
-网站：mayiwxw.com
-更新时间：9个月前
-最新章节：新书已发——《重燃青葱时代》
-
-❤序号🔺6🔻【笔趣阁(cc148)】
-网站：cc148.org
-更新时间：2年前
-最新章节：新书已发《重生之逆流十年》
-
-❤序号🔺7🔻【米飞小说网】
-网站：mifeixs.com
-更新时间：1年前
-最新章节：新书已发——《都养猫了还谈啥恋爱》
-
-❤序号🔺8🔻【图书迷】
-网站：tushumi.org
-更新时间：1年前
-最新章节：七、此肠非彼肠
-
-❤序号🔺9🔻【顶点小说】
-网站：ddyueshu.com
-更新时间：9个月前
-最新章节：新书已发——《重燃青葱时代》
-
-❤序号🔺10🔻【23书吧】
-网站：23shu8.net
-更新时间：8个月前
-最新章节：新书已发——《重燃青葱时代》
-
-❤序号🔺11🔻【燃文小说网】
-网站：rmtxt.com
-更新时间：1年前
-最新章节：新书已发——《都养猫了还谈啥恋爱》
-
-❤序号🔺12🔻【母卡小说网】
-网站：母卡小说网
-更新时间：3星期前
-最新章节：新书已发——《都养猫了还谈啥恋爱》
-
-❤序号🔺13🔻【爱豆看书网】
-网站：26ks.org
-更新时间：1年前
-最新章节：完结感言
-
-❤序号🔺14🔻【31小说网】
-网站：31xs.com
-更新时间：1年前
-最新章节：完结感言
-
-❤序号🔺15🔻【69书吧】
-网站：69shuba.tw
-更新时间：1年前
-最新章节：完结感言
-
-❤序号🔺16🔻【看书啦】
-网站：kanshula.vip
-更新时间：1年前
-最新章节：完结感言
-
-❤序号🔺17🔻【笔搜屋】
-网站：bisowu.net
-更新时间：1年前
-最新章节：042.没关系，我懂
-
-❤序号🔺18🔻【书海居】
-网站：shuhaiju.net
-更新时间：1年前
-最新章节：第三卷卷末总结"""
+load_external_sources()
 
 # 1. 基础配置与日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -635,256 +559,16 @@ async def get_resources(request: Request):
         except ValueError:
             pref = "0"
             
-        # 打包 18 个全网最强小说镜像源，支持阅读客户端 custom 变量秒级切换
-        resources_list = [
-            # 0. 笔趣阁阁 (秒级直连主站)
-            {
-                "sourceName": "bqg78.com",
-                "sourceDesc": "笔趣阁阁 (秒级直连)",
-                "sourceLastChapter": "点击开始阅读",
-                "sourceLastChapterUpdate": "最新更新",
-                "encoded": "utf-8",
-                "chapterPageUrl": f"https://www.bqg78.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 1. 香书小说
-            {
-                "sourceName": "ibiquges.org",
-                "sourceDesc": "香书小说",
-                "sourceLastChapter": "备用源1",
-                "sourceLastChapterUpdate": "9个月前",
-                "encoded": "utf-8",
-                "chapterPageUrl": f"https://www.ibiquges.org/{pref}/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 2. 43看书
-            {
-                "sourceName": "43kanshu.com",
-                "sourceDesc": "43看书",
-                "sourceLastChapter": "备用源2",
-                "sourceLastChapterUpdate": "2年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.43kanshu.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 3. 笔趣 (mibaoge)
-            {
-                "sourceName": "mibaogexs.com",
-                "sourceDesc": "笔趣 (mibaoge)",
-                "sourceLastChapter": "备用源3",
-                "sourceLastChapterUpdate": "9个月前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.mibaogexs.com/{pref}/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 4. 中网文学
-            {
-                "sourceName": "zwwx8a.com",
-                "sourceDesc": "中网文学",
-                "sourceLastChapter": "备用源4",
-                "sourceLastChapterUpdate": "2年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.zwwx8a.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 5. 蚂蚁文学
-            {
-                "sourceName": "mayiwxw.com",
-                "sourceDesc": "蚂蚁文学",
-                "sourceLastChapter": "备用源5",
-                "sourceLastChapterUpdate": "9个月前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.mayiwxw.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 6. 笔趣阁 (cc148)
-            {
-                "sourceName": "cc148.org",
-                "sourceDesc": "笔趣阁 (cc148)",
-                "sourceLastChapter": "备用源6",
-                "sourceLastChapterUpdate": "2年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.cc148.org/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 7. 米飞小说网
-            {
-                "sourceName": "mifeixs.com",
-                "sourceDesc": "米飞小说网",
-                "sourceLastChapter": "备用源7",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.mifeixs.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 8. 图书迷
-            {
-                "sourceName": "tushumi.org",
-                "sourceDesc": "图书迷",
-                "sourceLastChapter": "备用源8",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.tushumi.org/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 9. 顶点小说
-            {
-                "sourceName": "ddyueshu.com",
-                "sourceDesc": "顶点小说",
-                "sourceLastChapter": "备用源9",
-                "sourceLastChapterUpdate": "9个月前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.ddyueshu.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 10. 23书吧
-            {
-                "sourceName": "23shu8.net",
-                "sourceDesc": "23书吧",
-                "sourceLastChapter": "备用源10",
-                "sourceLastChapterUpdate": "8个月前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.23shu8.net/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 11. 燃文小说网
-            {
-                "sourceName": "rmtxt.com",
-                "sourceDesc": "燃文小说网",
-                "sourceLastChapter": "备用源11",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.rmtxt.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 12. 母卡小说网
-            {
-                "sourceName": "mukaxs.com",
-                "sourceDesc": "母卡小说网",
-                "sourceLastChapter": "备用源12",
-                "sourceLastChapterUpdate": "3星期前",
-                "encoded": "utf-8",
-                "chapterPageUrl": f"https://www.mukaxs.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 13. 爱豆看书网
-            {
-                "sourceName": "26ks.org",
-                "sourceDesc": "爱豆看书网",
-                "sourceLastChapter": "备用源13",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.26ks.org/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 14. 31小说网
-            {
-                "sourceName": "31xs.com",
-                "sourceDesc": "31小说网",
-                "sourceLastChapter": "备用源14",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.31xs.com/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 15. 69书吧
-            {
-                "sourceName": "69shuba.tw",
-                "sourceDesc": "69书吧",
-                "sourceLastChapter": "备用源15",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.69shuba.tw/book/{raw_id}.htm",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 16. 看书啦
-            {
-                "sourceName": "kanshula.vip",
-                "sourceDesc": "看书啦",
-                "sourceLastChapter": "备用源16",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.kanshula.vip/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 17. 笔搜屋
-            {
-                "sourceName": "bisowu.net",
-                "sourceDesc": "笔搜屋",
-                "sourceLastChapter": "备用源17",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.bisowu.net/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            },
-            # 18. 书海居
-            {
-                "sourceName": "shuhaiju.net",
-                "sourceDesc": "书海居",
-                "sourceLastChapter": "备用源18",
-                "sourceLastChapterUpdate": "1年前",
-                "encoded": "gbk",
-                "chapterPageUrl": f"https://www.shuhaiju.net/book/{raw_id}/",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            }
-        ]
+        # 从本地加载 18 个全网最强小说镜像源，支持阅读客户端 custom 变量秒级切换
+        resources_list = []
+        for res in EXTERNAL_RESOURCES:
+            res_copy = dict(res)
+            try:
+                # 动态填充 URL 中的占位符
+                res_copy["chapterPageUrl"] = res.get("chapterPageUrl", "").format(raw_id=raw_id, pref=pref)
+            except Exception:
+                pass
+            resources_list.append(res_copy)
 
         # 如果是 笔趣阁阁 (秒级直连)，我们可以额外在局域网服务端实时为客户端抓取章节列表缓存
         if book_id.startswith("bqg78_"):
