@@ -1,30 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-apigw-mock-helper - 通用 API 代理与协议测试网关
-功能特性：
-1. 升级版防网络探测 Session 网关，模拟全套浏览器标头。
-2. 引入 TLS 握手自适应降级组件，自适应多节点握手。
-3. 云端 AES-128-CBC 数据安全传输分发，保证传输链路安全。
-4. SQLite 本地轻量持久化数据库，完美承载节点配置及注册。
-5. 智能数据排版净化引擎，自动提取格式化文字结构。
+apigw-mock-helper - 通用 API 代理与协议测试网关 (重构模块化版)
 """
 
 import os
-import re
-import ssl
+import json
 import sqlite3
 import logging
-import base64
 import secrets
-import urllib.parse
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
-from curl_cffi import requests
+
+from sources import manager as sources_manager
+from sources.utils import aes_encrypt_base64
+
+# 1. 基础配置与日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="apigw-mock-helper-api")
+DB_FILE = os.path.join(os.path.dirname(__file__), "legado.db")
 
 # ==================== 全局多源备用指引 (本地 sources.json 动态配置) ====================
-import json
-
 MULTISOURCE_INTRO = ""
 EXTERNAL_RESOURCES = []
 
@@ -41,107 +39,13 @@ def load_external_sources():
         except Exception as e:
             logger.error(f"⚠️ 读取 sources.json 失败: {str(e)}")
     else:
-        # 默认备用指引，在 GitHub 上看起来完全合规且清白！
         MULTISOURCE_INTRO = "\n\n📌使用说明：请放置本地 sources.json 以激活多数据源中转指引。"
         EXTERNAL_RESOURCES = []
 
 load_external_sources()
 
-# 1. 基础配置与日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
-app = FastAPI(title="apigw-mock-helper-api")
-DB_FILE = "legado.db"
-
-# AES 密钥与向量配置 (与客户端 Java.aesBase64Decode 完美匹配)
-AES_KEY = b"Pxga!h*e4@T8xfOm"
-AES_IV = b"E&z!EHGLd$fli*8R"
-
-# 尝试引入 AES 加密套件
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import pad
-    HAS_CRYPTO = True
-    logger.info("✅ 成功加载 pycryptodome 库，安全加密已激活。")
-except ImportError:
-    HAS_CRYPTO = False
-    logger.warning("⚠️ 未检测到 pycryptodome 库，请使用 pip install pycryptodome 安装以激活加密分发！")
-
-
-# ==================== 1. SSL/TLS 自适应握手降级适配组件 ====================
-
-# 已升级为基于 curl_cffi.requests.Session(impersonate="chrome120") 的协议级降维打击
-
-
-def get_secure_session() -> requests.Session:
-    """
-    获取一个基于 curl_cffi 的 Pro 级破盾 Session，完美模拟 Chrome 120 浏览器 TLS JA3 指纹。
-    """
-    # 核心：使用 impersonate 参数完美模拟 Chrome120 的 JA3 TLS 握手和 HTTP/2 帧！
-    session = requests.Session(impersonate="chrome120")
-    
-    # 额外补充全套首部以提升防爬表现
-    session.headers.update({
-        "Accept-Language": "zh-CN,zh;q=0.9,en-GB;q=0.8,en;q=0.7,en-US;q=0.6",
-        "Cache-Control": "max-age=0",
-        "Upgrade-Insecure-Requests": "1"
-    })
-    return session
-
-
-# ==================== 2. 加密与正文净化排版辅助方法 ====================
-
-def aes_encrypt_base64(text: str) -> str:
-    """
-    使用 AES-128-CBC PKCS7(等价于PKCS5Padding) 算法对数据进行云端加密
-    """
-    if not HAS_CRYPTO:
-        # 若未安装依赖，友好降级为明文 Base64 以保证健壮性
-        return base64.b64encode(text.encode('utf-8')).decode('utf-8')
-    try:
-        raw_bytes = text.encode('utf-8')
-        cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
-        padded_bytes = pad(raw_bytes, 16, style='pkcs7')
-        encrypted_bytes = cipher.encrypt(padded_bytes)
-        return base64.b64encode(encrypted_bytes).decode('utf-8')
-    except Exception as e:
-        logger.error(f"AES 加密发生异常: {str(e)}")
-        return text
-
-
-def clean_content_text(html_text: str) -> str:
-    """
-    智能正文提取与网页垃圾/广告牛皮癣智能净化排版算法
-    """
-    # 1. 过滤 script, style, iframe 等无用交互标签
-    html_text = re.sub(r'<script.*?>.*?</script>', '', html_text, flags=re.S | re.I)
-    html_text = re.sub(r'<style.*?>.*?</style>', '', html_text, flags=re.S | re.I)
-    html_text = re.sub(r'<iframe.*?>.*?</iframe>', '', html_text, flags=re.S | re.I)
-    
-    # 2. 将换行和段落标签转换为标准换行
-    html_text = re.sub(r'<br\s*/?>', '\n', html_text, flags=re.I)
-    html_text = re.sub(r'<p>', '\n', html_text, flags=re.I)
-    html_text = re.sub(r'</p>', '', html_text, flags=re.I)
-    
-    # 3. 剥离剩余所有残余网页 HTML 标签
-    html_text = re.sub(r'<.*?>', '', html_text, flags=re.S)
-    
-    # 4. 清理牛皮癣文字广告
-    html_text = re.sub(r'(?i)一秒记住.*|(?i)请收藏本站.*|(?i)本章未完.*|(?i)记住网址.*|(?i)为您提供.*|(?i)最新最快更新.*', '', html_text)
-    
-    # 5. 排版美化：去除首尾空白字符，规范化空行，添加优美的段落缩进
-    lines = html_text.split('\n')
-    clean_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and len(stripped) > 2: # 过滤掉极短的网页碎片噪音
-            clean_lines.append(f"　　{stripped}") # 加上两个全角空格的首行缩进，完美排版
-            
-    return "\n\n".join(clean_lines)
-
-
-# ==================== 3. SQLite 本地云书架数据库管理 ====================
+# ==================== SQLite 本地云书架数据库管理 ====================
 
 def init_db():
     try:
@@ -179,6 +83,7 @@ def init_db():
 
 init_db()
 
+
 def verify_user(uid: str, token: str) -> int:
     """
     验证客户端下发的 UID 和 Token
@@ -197,157 +102,12 @@ def verify_user(uid: str, token: str) -> int:
     return 0
 
 
-# ==================== 4. 实时并发网络爬虫解析模块 ====================
-
-def crawl_search_from_69shuba(keyword: str) -> List[Dict[str, Any]]:
-    """
-    实时去 69书吧 抓取并解析搜索结果 (防 403 升级版 - 彻底修复 GBK payload urlencode 问题)
-    """
-    books = []
-    search_url = "https://www.69shuba.com/modules/article/search.php"
-    session = get_secure_session()
-    
-    try:
-        # 核心：使用 urllib.parse.urlencode 显式指定 gbk 编码并转为 bytes
-        # 从而避开 requests 在处理 bytes dictionary 时的 urlencode 解析缺陷，完美保留 GBK
-        payload_data = {
-            "searchkey": keyword,
-            "searchtype": "all"
-        }
-        encoded_payload = urllib.parse.urlencode(payload_data, encoding="gbk").encode("gbk")
-        
-        # 必须显式更新 Headers 的 Content-Type 为表单提交格式，否则对方防火墙可能 403
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": "https://www.69shuba.com/"
-        }
-        logger.info(f"🕸️ [数据节点A] 正在实时发起 GBK 编码数据检索: keyword={keyword}")
-        
-        response = session.post(search_url, data=encoded_payload, headers=headers, timeout=8, verify=False)
-        response.encoding = 'gbk'
-        html = response.text
-        
-        # 状况 A：直接重定向到详情页 (通常因为精确匹配了书名)
-        if "booknav2" in html:
-            name_match = re.search(r'<h1><a href=".*?">(.*?)</a></h1>', html)
-            author_match = re.search(r'<div class="booknav2">.*?作者：<a href=".*?">(.*?)</a>', html, re.S)
-            url_match = re.search(r'property="og:url" content="(.*?)"', html)
-            cover_match = re.search(r'<div class="bookimg2"><img src="(.*?)"', html)
-            intro_match = re.search(r'<div class="navtxt">(.*?)</div>', html, re.S)
-            
-            if name_match and url_match:
-                name = name_match.group(1).strip()
-                author = author_match.group(1).strip() if author_match else "未知"
-                url = url_match.group(1).strip()
-                cover = cover_match.group(1).strip() if cover_match else "https://api.mwm.moe/ycy"
-                intro = clean_content_text(intro_match.group(1)) if intro_match else "暂无简介"
-                
-                book_id_match = re.search(r'/book/(\d+)\.htm', url)
-                book_id = book_id_match.group(1) if book_id_match else "38422"
-                
-                books.append({
-                    "book_id": f"69_{book_id}",
-                    "book_name": name,
-                    "book_author": author,
-                    "book_pic": cover,
-                    "book_intro": intro[:150] + "...",
-                    "book_lastchapter": "点击阅读本章节",
-                    "categoryName": "69书吧 (自建云中转)"
-                })
-                
-        # 状况 B：返回搜索结果列表页
-        else:
-            items = re.findall(r'<div class="newbox">.*?<li>(.*?)</li>', html, re.S)
-            for item in items:
-                name_url = re.search(r'<h3><a href="(.*?)">(.*?)</a></h3>', item)
-                author = re.search(r'<span class="author">作者：(.*?)</span>', item)
-                cover = re.search(r'<img src="(.*?)"', item)
-                intro = re.search(r'<p>(.*?)</p>', item, re.S)
-                
-                if name_url:
-                    url = name_url.group(1)
-                    name = name_url.group(2).strip()
-                    author_str = author.group(1).strip() if author else "未知"
-                    cover_str = cover.group(1) if cover else "https://api.mwm.moe/ycy"
-                    intro_str = re.sub(r'<.*?>|\s+', '', intro.group(1)) if intro else "暂无"
-                    
-                    book_id_match = re.search(r'/book/(\d+)\.htm', url)
-                    book_id = book_id_match.group(1) if book_id_match else "38422"
-                    
-                    books.append({
-                        "book_id": f"69_{book_id}",
-                        "book_name": name,
-                        "book_author": author_str,
-                        "book_pic": cover_str,
-                        "book_intro": intro_str[:150] + "...",
-                        "book_lastchapter": "点击源站换源阅读",
-                        "categoryName": "69书吧 (自建云中转)"
-                    })
-    except Exception as e:
-        logger.error(f"❌ 实时搜索 69书吧 发生严重异常: {str(e)}")
-        
-    return books
-
-
-def crawl_search_from_bqg78(keyword: str) -> List[Dict[str, Any]]:
-    """
-    实时去 笔趣阁阁 (bqg78.com) 抓取并解析 JSON 搜索结果 (超强直连、免代理、秒级高并发大站)
-    """
-    books = []
-    session = get_secure_session()
-    session.headers.update({
-        "Referer": f"https://www.bqg78.com/s?q={urllib.parse.quote(keyword)}"
-    })
-    
-    try:
-        logger.info(f"🕸️ [数据节点B] 正在激活检索索引: keyword={keyword}")
-        hm_url = f"https://www.bqg78.com/user/hm.html?q={urllib.parse.quote(keyword)}"
-        session.get(hm_url, timeout=5)
-        
-        logger.info(f"🕸️ [数据节点B] 正在实时请求 JSON 数据结果...")
-        search_url = f"https://www.bqg78.com/user/search.html?q={urllib.parse.quote(keyword)}"
-        response = session.get(search_url, timeout=6)
-        
-        if response.status_code == 200:
-            results = response.json()
-            logger.info(f"笔趣阁阁成功返回 {len(results)} 条 JSON 书籍数据。")
-            for item in results[:30]:  # 截取前 30 条最相关的书籍
-                name = item.get("articlename", "").strip()
-                author = item.get("author", "").strip()
-                cover = item.get("url_img", "").strip()
-                url_path = item.get("url_list", "").strip() # 例如 /book/1148/
-                intro = item.get("intro", "").strip()
-                
-                # 提取 book_id
-                book_id_match = re.search(r'/book/(\d+)/', url_path)
-                book_id = book_id_match.group(1) if book_id_match else "673"
-                
-                if not cover.startswith("http"):
-                    cover = "https://www.bqg78.com" + cover
-                    
-                books.append({
-                    "book_id": f"bqg78_{book_id}",
-                    "book_name": name,
-                    "book_author": author,
-                    "book_pic": cover,
-                    "book_intro": intro[:150] + "...",
-                    "book_lastchapter": "点击进入换源",
-                    "categoryName": "笔趣阁阁 (秒级直连)"
-                })
-        else:
-            logger.warning(f"笔趣阁阁搜索请求失败，状态码: {response.status_code}")
-    except Exception as e:
-        logger.error(f"❌ 实时搜索笔趣阁阁发生异常: {str(e)}")
-        
-    return books
-
-
-# ==================== 5. FastAPI 核心 API 路由接口 ====================
+# ==================== FastAPI 核心 API 路由接口 ====================
 
 @app.post("/api.php/Book/getSearchBook")
 async def get_search_book(request: Request):
     """
-    一、 全网实时并发去重搜索 API (高鲁棒性容错版)
+    一、 全网实时去重搜索 API
     """
     try:
         try:
@@ -355,7 +115,6 @@ async def get_search_book(request: Request):
         except Exception:
             try:
                 # 兼容由于 Windows 终端转义问题导致的非标 JSON 字符串
-                import json
                 raw_body = await request.body()
                 raw_str = raw_body.decode('utf-8', errors='ignore').strip()
                 body = json.loads(raw_str)
@@ -369,20 +128,17 @@ async def get_search_book(request: Request):
         if not keyword:
             return JSONResponse(content={"msg": "Success", "code": 0, "data": {"list": []}})
         
-        # 1. 实时爬取三大核心原站，将结果进行多源合并
-        books_69 = crawl_search_from_69shuba(keyword)
-        books_bqg78 = crawl_search_from_bqg78(keyword)
+        # 调度多源模块合并去重搜索
+        merged_books = sources_manager.search_books(keyword)
         
-        merged_books = books_69 + books_bqg78
-        
-        # 2. 空白保护：如果全网没有搜到，返回一本自建引导的虚拟演示书
+        # 空白保护：如果全网没有搜到，返回一本自建引导的虚拟演示书
         if not merged_books:
             merged_books.append({
                 "book_id": "69_43977",
                 "book_name": f"未搜到《{keyword}》，点击体验测试",
                 "book_author": "自建云聚合",
                 "book_pic": "https://api.mwm.moe/ycy",
-                "book_intro": "📂 简介：自建服务器没有在 69书吧、香书小说、新笔趣阁检索到对应书籍，您可以点击此书测试云端实时目录抓取和正文 AES 解密功能！",
+                "book_intro": "📂 简介：自建服务器没有在各个书源检索到对应书籍，您可以点击此书测试云端实时目录抓取和正文 AES 解密功能！",
                 "book_lastchapter": "第一章 开始自建看书之旅",
                 "categoryName": "云聚合演示"
             })
@@ -402,114 +158,30 @@ async def get_search_book(request: Request):
 @app.post("/api.php/Book/getBookInfo")
 async def get_book_info(request: Request):
     """
-    二、 书籍详情 API (提供实时原站信息匹配)
+    二、 书籍详情 API (提供实时原站信息匹配与备用换源指引拼装)
     """
     try:
         body = await request.json()
         book_id = str(body.get("bookId", "69_43977")).strip()
         logger.info(f"🔔 详情页获取: bookId={book_id}")
         
-        book_name = "未知书籍"
-        book_author = "未知作者"
-        book_pic = "https://api.mwm.moe/ycy"
-        book_intro = "暂无简介"
+        # 调度模块层获取各大源站的真实图书数据 (书名、作者、封面与简介)
+        book_detail = sources_manager.get_book_info(book_id)
         
-        # D. 针对笔趣阁阁来源实时爬取书籍详情
-        if book_id.startswith("bqg78_"):
-            raw_id = book_id.replace("bqg78_", "")
-            book_url = f"https://www.bqg78.com/book/{raw_id}/"
-            session = get_secure_session()
-            try:
-                response = session.get(book_url, timeout=8)
-                html = response.text
-                
-                # 笔趣阁阁详情解析
-                name_match = re.search(r'<div\s+class\s*=\s*"info">.*?<h1>(.*?)</h1>', html, re.S)
-                author_match = re.search(r'<div\s+class\s*=\s*"info">.*?作者：(.*?)</div>', html, re.S)
-                cover_match = re.search(r'<div\s+class\s*=\s*"bookimg">.*?<img\s+src\s*=\s*"([^"]+)"', html, re.S)
-                intro_match = re.search(r'<div\s+class\s*=\s*"intro">(.*?)</div>', html, re.S)
-                
-                book_name = name_match.group(1).strip() if name_match else "未知"
-                book_author = author_match.group(1).strip() if author_match else "未知"
-                book_pic = cover_match.group(1).strip() if cover_match else "https://api.mwm.moe/ycy"
-                if not book_pic.startswith("http"):
-                    book_pic = "https://www.bqg78.com" + book_pic
-                book_intro = clean_content_text(intro_match.group(1)) if intro_match else "暂无"
-                
-                # 将 18 个镜像站的配置指引追加到简介尾部，满足手机详情页呈现需求
-                book_intro += MULTISOURCE_INTRO
-                
-            except Exception as ex:
-                logger.error(f"抓取笔趣阁阁详情异常: {str(ex)}")
-                
-        # A. 针对 69书吧来源实时爬取书籍详情
-        elif book_id.startswith("69_"):
-            raw_id = book_id.replace("69_", "")
-            book_url = f"https://www.69shuba.com/book/{raw_id}.htm"
-            session = get_secure_session()
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                name_match = re.search(r'<h1><a href=".*?">(.*?)</a></h1>', html)
-                author_match = re.search(r'<div class="booknav2">.*?作者：<a href=".*?">(.*?)</a>', html, re.S)
-                cover_match = re.search(r'<div class="bookimg2"><img src="(.*?)"', html)
-                intro_match = re.search(r'<div class="navtxt">(.*?)</div>', html, re.S)
-                
-                book_name = name_match.group(1).strip() if name_match else "未知"
-                book_author = author_match.group(1).strip() if author_match else "未知"
-                book_pic = cover_match.group(1).strip() if cover_match else "https://api.mwm.moe/ycy"
-                book_intro = clean_content_text(intro_match.group(1)) if intro_match else "暂无"
-            except Exception as ex:
-                logger.error(f"抓取 69书吧 详情异常: {str(ex)}")
-                
-        # B. 针对香书小说来源实时爬取书籍详情
-        elif book_id.startswith("xs_"):
-            raw_id = book_id.replace("xs_", "")
-            path_part = raw_id.replace("_", "/")
-            book_url = f"https://www.ibiquges.org/{path_part}/"
-            session = get_secure_session()
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'utf-8'
-                html = response.text
-                
-                name_match = re.search(r'<div id="info">.*?<h1>(.*?)</h1>', html, re.S)
-                author_match = re.search(r'<div id="info">.*?<p>作\s*者：(.*?)</p>', html, re.S)
-                cover_match = re.search(r'<div id="fmimg">.*?<img.*?src="(.*?)"', html, re.S)
-                intro_match = re.search(r'<div id="intro">(.*?)</div>', html, re.S)
-                
-                book_name = name_match.group(1).strip() if name_match else "未知"
-                book_author = author_match.group(1).strip() if author_match else "未知"
-                book_pic = f"https://www.ibiquges.org{cover_match.group(1).strip()}" if cover_match else "https://api.mwm.moe/ycy"
-                book_intro = clean_content_text(intro_match.group(1)) if intro_match else "暂无"
-            except Exception as ex:
-                logger.error(f"抓取香书小说详情异常: {str(ex)}")
-                
-        # C. 针对新笔趣阁来源实时爬取书籍详情
-        elif book_id.startswith("bq_"):
-            raw_id = book_id.replace("bq_", "")
-            path_part = raw_id.replace("_", "/")
-            book_url = f"https://www.xbiquge.la/{path_part}/"
-            session = get_secure_session()
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                name_match = re.search(r'<div id="info">\s*<h1>(.*?)</h1>', html)
-                author_match = re.search(r'<p>作&nbsp;&nbsp;&nbsp;&nbsp;者：(.*?)</p>', html)
-                cover_match = re.search(r'<div id="fmimg">.*?<img.*?src="(.*?)"', html, re.S)
-                intro_match = re.search(r'<div id="intro">(.*?)</div>', html, re.S)
-                
-                book_name = name_match.group(1).strip() if name_match else "未知"
-                book_author = author_match.group(1).strip() if author_match else "未知"
-                book_pic = cover_match.group(1).strip() if cover_match else "https://api.mwm.moe/ycy"
-                book_intro = clean_content_text(intro_match.group(1)) if intro_match else "暂无"
-            except Exception as ex:
-                logger.error(f"抓取新笔趣阁详情异常: {str(ex)}")
-                
+        book_name = book_detail["book_name"]
+        book_author = book_detail["book_author"]
+        book_pic = book_detail["book_pic"]
+        book_intro = book_detail["book_intro"]
+        latest_ch = book_detail["latest_ch"]
+
+        # 将 18 个镜像站的配置指引动态格式化并追加到简介尾部，展现真实小说的最新状态！
+        try:
+            formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch)
+        except Exception:
+            formatted_intro = MULTISOURCE_INTRO
+        
+        book_intro += formatted_intro
+        
         return JSONResponse(content={
             "msg": "Success",
             "code": 0,
@@ -541,16 +213,11 @@ async def get_resources(request: Request):
         book_id = str(body.get("bookId", "69_43977")).strip()
         logger.info(f"🔔 实时目录抓取与AES加密: bookId={book_id}")
         
-        chapters = []
-        session = get_secure_session()
-        
-        # 提取真实纯数字 ID，用于计算子目录分类 (杰奇系统如 /38/38422/ 的格式)
+        # 1. 获取纯数字 ID 与前缀
         raw_id = "673"
-        clean_id = book_id
-        for prefix in ["bqg78_", "69_", "xs_"]:
+        for prefix in ["bqg78_", "69_", "xs_", "bq_"]:
             if book_id.startswith(prefix):
                 raw_id = book_id.replace(prefix, "")
-                clean_id = raw_id
                 break
                 
         try:
@@ -559,7 +226,7 @@ async def get_resources(request: Request):
         except ValueError:
             pref = "0"
             
-        # 从本地加载 18 个全网最强小说镜像源，支持阅读客户端 custom 变量秒级切换
+        # 2. 从本地加载并格式化 18 个全网最强小说镜像源
         resources_list = []
         for res in EXTERNAL_RESOURCES:
             res_copy = dict(res)
@@ -570,95 +237,9 @@ async def get_resources(request: Request):
                 pass
             resources_list.append(res_copy)
 
-        # 如果是 笔趣阁阁 (秒级直连)，我们可以额外在局域网服务端实时为客户端抓取章节列表缓存
-        if book_id.startswith("bqg78_"):
-            book_url = f"https://www.bqg78.com/book/{clean_id}/"
-            try:
-                response = session.get(book_url, timeout=8)
-                html = response.text
-                dd_tags = re.findall(r'<dd><a\s+href\s*=\s*"([^"]+)">(.*?)</a></dd>', html, re.S)
-                for href, name in dd_tags:
-                    clean_name = name.strip()
-                    encrypted_name = aes_encrypt_base64(clean_name)
-                    chapters.append({
-                        "name": encrypted_name,
-                        "path": f"https://www.bqg78.com{href}"
-                    })
-                logger.info(f"数据节点B成功为客户端返回了 {len(chapters)} 个数据目录。")
-            except Exception as ex:
-                logger.error(f"抓取数据节点B目录失败: {str(ex)}")
-
-        # A. 解析 69书吧目录结构
-        if book_id.startswith("69_"):
-            raw_id = book_id.replace("69_", "")
-            book_url = f"https://www.69shuba.com/book/{raw_id}.htm"
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                catalog_block = re.search(r'<div class="catalog">.*?<ul>(.*?)</ul>', html, re.S)
-                if catalog_block:
-                    li_tags = re.findall(r'<li.*?><a href="(.*?)">(.*?)</a></li>', catalog_block.group(1), re.S)
-                    for href, name in li_tags:
-                        clean_name = name.strip()
-                        # 对章节名字进行 AES 动态加密打包，配合客户端解密
-                        encrypted_name = aes_encrypt_base64(clean_name)
-                        chapters.append({
-                            "name": encrypted_name,
-                            # 保存真实的抓取源站 URL
-                            "path": href
-                        })
-            except Exception as ex:
-                logger.error(f"抓取 69书吧 目录异常: {str(ex)}")
-                
-        # B. 解析香书小说目录结构
-        elif book_id.startswith("xs_"):
-            raw_id = book_id.replace("xs_", "")
-            path_part = raw_id.replace("_", "/")
-            book_url = f"https://www.ibiquges.org/{path_part}/"
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'utf-8'
-                html = response.text
-                
-                catalog_block = re.search(r'<div id="list">.*?<dl>(.*?)</dl>', html, re.S)
-                if catalog_block:
-                    dd_tags = re.findall(r'<dd><a href="(.*?)">(.*?)</a></dd>', catalog_block.group(1), re.S)
-                    for href, name in dd_tags:
-                        clean_name = name.strip()
-                        encrypted_name = aes_encrypt_base64(clean_name)
-                        chapters.append({
-                            "name": encrypted_name,
-                            # 拼接香书小说的章节完整 URL
-                            "path": f"https://www.ibiquges.org/{path_part}/{href}"
-                        })
-            except Exception as ex:
-                logger.error(f"抓取香书小说目录异常: {str(ex)}")
-
-        # C. 解析新笔趣阁目录结构
-        elif book_id.startswith("bq_"):
-            raw_id = book_id.replace("bq_", "")
-            path_part = raw_id.replace("_", "/")
-            book_url = f"https://www.xbiquge.la/{path_part}/"
-            try:
-                response = session.get(book_url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                catalog_block = re.search(r'<div id="list">.*?<dl>(.*?)</dl>', html, re.S)
-                if catalog_block:
-                    dd_tags = re.findall(r'<dd><a href="(.*?)">(.*?)</a></dd>', catalog_block.group(1), re.S)
-                    for href, name in dd_tags:
-                        clean_name = name.strip()
-                        encrypted_name = aes_encrypt_base64(clean_name)
-                        chapters.append({
-                            "name": encrypted_name,
-                            "path": f"https://www.xbiquge.la/{path_part}/{href}"
-                        })
-            except Exception as ex:
-                logger.error(f"抓取新笔趣阁目录异常: {str(ex)}")
-                
+        # 3. 调度爬虫获取加密后的目录结构
+        chapters = sources_manager.get_chapters(book_id)
+        
         return JSONResponse(content={
             "msg": "Success",
             "code": 0,
@@ -685,48 +266,9 @@ async def get_real_content(request: Request):
         if not url:
             return JSONResponse(content={"msg": "未指定正文链接参数", "code": -1})
             
-        clean_text = "抓取章节正文内容失败，请稍后刷新重试"
-        session = get_secure_session()
+        # 调度多源模块爬取并清洗正文
+        clean_text = sources_manager.get_content(url)
         
-        # A. 实时抓取 69书吧的正文并净化
-        if "69shuba" in url:
-            try:
-                response = session.get(url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                content_block = re.search(r'<div class="txtnav">(.*?)</div>', html, re.S)
-                if content_block:
-                    clean_text = clean_content_text(content_block.group(1))
-            except Exception as ex:
-                logger.error(f"抓取 69书吧正文出错: {str(ex)}")
-                
-        # B. 实时抓取香书小说的正文并净化
-        elif "ibiquges.org" in url:
-            try:
-                response = session.get(url, timeout=8, verify=False)
-                response.encoding = 'utf-8'
-                html = response.text
-                
-                content_block = re.search(r'<div id="content">(.*?)</div>', html, re.S)
-                if content_block:
-                    clean_text = clean_content_text(content_block.group(1))
-            except Exception as ex:
-                logger.error(f"抓取香书小说正文出错: {str(ex)}")
-
-        # C. 实时抓取新笔趣阁的正文并净化
-        elif "xbiquge.la" in url:
-            try:
-                response = session.get(url, timeout=8, verify=False)
-                response.encoding = 'gbk'
-                html = response.text
-                
-                content_block = re.search(r'<div id="content">(.*?)</div>', html, re.S)
-                if content_block:
-                    clean_text = clean_content_text(content_block.group(1))
-            except Exception as ex:
-                logger.error(f"抓取新笔趣阁正文出错: {str(ex)}")
-                
         # 对净化后的正文文字进行 AES 加密
         encrypted_text = aes_encrypt_base64(clean_text)
         
@@ -742,7 +284,7 @@ async def get_real_content(request: Request):
         return JSONResponse(status_code=500, content={"msg": str(e), "code": -1})
 
 
-# ==================== 6. SQLite 联动之云书架交互接口 ====================
+# ==================== SQLite 联动之云书架交互接口 ====================
 
 @app.post("/api.php/users/register")
 async def register(request: Request):
@@ -812,7 +354,7 @@ async def login(request: Request):
 @app.post("/api.php/users/addSheet")
 async def add_sheet(request: Request, uid: str = Header(None), token: str = Header(None)):
     """
-    七、 添加书籍到我的云书架 (SQLite 持久化关系，实时联动 MOCK/CRAWL 库)
+    七、 添加书籍到我的云书架 (SQLite 持久化关系，自动调用 CRAWL 获取详情存储)
     """
     try:
         user_id = verify_user(uid, token)
@@ -826,19 +368,16 @@ async def add_sheet(request: Request, uid: str = Header(None), token: str = Head
             return JSONResponse(content={"msg": "操作失败：书籍 ID 不能为空", "code": -1})
 
         # 触发一次详情抓取，用来自动填充保存在 SQLite 书架表中的书籍属性，以供发现页优雅渲染
-        book_name = "自选实时源书籍"
-        book_author = "多源聚合"
-        book_pic = "https://api.mwm.moe/ycy"
-        book_intro = "云端书架收藏书籍"
+        book_detail = sources_manager.get_book_info(book_id)
         
-        # 实时拉取最新详情用以填充
-        if book_id.startswith("69_") or book_id.startswith("xs_"):
-            try:
-                # 模拟发起一次详情拉取以做属性落地
-                # 此处直接快速复用之前详情抓取的解析段
-                pass
-            except Exception:
-                pass
+        book_name = book_detail.get("book_name", "自选实时源书籍")
+        book_author = book_detail.get("book_author", "多源聚合")
+        book_pic = book_detail.get("book_pic", "https://api.mwm.moe/ycy")
+        book_intro = book_detail.get("book_intro", "云端书架收藏书籍")
+        
+        # 裁剪可能过长的中转使用说明简介，以免数据库行过于庞大
+        if len(book_intro) > 300:
+            book_intro = book_intro[:300] + "..."
 
         logger.info(f"用户 UID={user_id} 添加书籍 ID={book_id} 到云端书架")
 
@@ -890,7 +429,6 @@ async def delete_sheet(request: Request, uid: str = Header(None), token: str = H
 async def get_sheet(request: Request, uid: str = Header(None), token: str = Header(None)):
     """
     九、 发现页拉取我的云书架列表 API
-    从 SQLite 表中取出书籍，与实时属性进行填充并呈现到发现页中
     """
     try:
         user_id = verify_user(uid, token)
@@ -907,7 +445,6 @@ async def get_sheet(request: Request, uid: str = Header(None), token: str = Head
         results = []
         for row in rows:
             bid, name, author, pic, intro = row
-            # 返回精美的、可被 Legado 发现页直接完美呈现的书籍参数
             results.append({
                 "book_id": bid,
                 "book_name": name if name else f"自建书籍 ID: {bid}",
