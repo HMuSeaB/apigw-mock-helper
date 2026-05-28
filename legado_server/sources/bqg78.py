@@ -71,9 +71,10 @@ def crawl_search(keyword: str) -> List[Dict[str, Any]]:
 
 def crawl_info(book_id: str) -> Dict[str, Any]:
     """
-    抓取笔趣阁阁书籍详情 (真实书名、作者、封面与简介，且包含动态更新时间)
+    抓取笔趣阁阁书籍详情 (含3次自动重试防线与人性化更新时间转换)
     """
     from sources.utils import get_relative_time
+    import time
     clean_id = book_id.replace("bqg78_", "")
     book_url = f"https://www.bqg78.com/book/{clean_id}/"
     session = get_secure_session()
@@ -91,8 +92,21 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
     
     try:
         logger.info(f"🕸️ [bqg78] 正在抓取书籍详情: {book_url}")
-        response = session.get(book_url, timeout=8)
-        if response.status_code == 200:
+        
+        response = None
+        for attempt in range(3):
+            try:
+                response = session.get(book_url, timeout=8)
+                if response.status_code == 200:
+                    break
+                logger.warning(f"⚠️ [bqg78] 尝试获取详情第 {attempt+1} 次失败，状态码: {response.status_code}")
+            except Exception as ex:
+                if attempt == 2:
+                    logger.error(f"❌ [bqg78] 重试 3 次后获取详情依旧失败: {str(ex)}")
+                    raise ex
+                time.sleep(1.5)
+                
+        if response and response.status_code == 200:
             html = response.text
             
             # 解析书名、作者、封面、简介、最新章节、最新更新时间
@@ -130,7 +144,7 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
                 raw_time = update_match.group(1).strip()
                 detail["latest_update"] = get_relative_time(raw_time)
         else:
-            logger.warning(f"⚠️ [bqg78] 获取详情页失败，状态码: {response.status_code}")
+            logger.warning("⚠️ [bqg78] 未能成功获取详情响应")
     except Exception as e:
         logger.error(f"❌ [bqg78] 获取详情异常: {str(e)}")
         
