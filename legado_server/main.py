@@ -10,7 +10,7 @@ import logging
 import secrets
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 from sources import manager as sources_manager
 from sources.utils import aes_encrypt_base64
@@ -103,6 +103,76 @@ def verify_user(uid: str, token: str) -> int:
 
 
 # ==================== FastAPI 核心 API 路由接口 ====================
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    """
+    根路由：提供精美的 API 网关健康状态运行提示页面 (保持高水准的技术伪装)
+    """
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>API Gateway Mock Helper</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                background-color: #0c0c0e;
+                color: #e4e4e7;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .container {
+                text-align: center;
+                padding: 3rem 2.5rem;
+                background: #141416;
+                border-radius: 16px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+                border: 1px solid #27272a;
+                max-width: 450px;
+                width: 90%;
+            }
+            h1 {
+                color: #10b981;
+                font-size: 2rem;
+                margin: 0 0 0.8rem 0;
+                letter-spacing: -0.025em;
+                font-weight: 700;
+            }
+            p {
+                color: #a1a1aa;
+                font-size: 1rem;
+                line-height: 1.5;
+                margin: 0 0 1.5rem 0;
+            }
+            .status {
+                display: inline-block;
+                padding: 0.4rem 1.2rem;
+                background: rgba(16, 185, 129, 0.1);
+                color: #10b981;
+                border-radius: 30px;
+                font-weight: 600;
+                font-size: 0.875rem;
+                border: 1px solid rgba(16, 185, 129, 0.25);
+                letter-spacing: 0.05em;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>apigw-mock-helper</h1>
+            <p>API Proxy Gateway & Protocol Testing Service is running successfully.</p>
+            <div class="status">● ACTIVE</div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
+
 
 @app.post("/api.php/Book/getSearchBook")
 async def get_search_book(request: Request):
