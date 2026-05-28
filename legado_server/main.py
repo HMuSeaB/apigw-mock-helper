@@ -158,7 +158,7 @@ async def get_search_book(request: Request):
 @app.post("/api.php/Book/getBookInfo")
 async def get_book_info(request: Request):
     """
-    二、 书籍详情 API (提供实时原站信息匹配与备用换源指引拼装)
+    二、 书籍详情 API (提供实时原站信息匹配与备用换源指引拼装，完美支持动态更新时间同步)
     """
     try:
         body = await request.json()
@@ -173,12 +173,17 @@ async def get_book_info(request: Request):
         book_pic = book_detail["book_pic"]
         book_intro = book_detail["book_intro"]
         latest_ch = book_detail["latest_ch"]
+        latest_update = book_detail.get("latest_update", "实时同步")
 
         # 将 18 个镜像站的配置指引动态格式化并追加到简介尾部，展现真实小说的最新状态！
         try:
-            formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch)
+            # 支持动态渲染章节与更新时间差，做到与截图一模一样的人性化时间差显示！
+            formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch, latest_update=latest_update)
         except Exception:
-            formatted_intro = MULTISOURCE_INTRO
+            try:
+                formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch)
+            except Exception:
+                formatted_intro = MULTISOURCE_INTRO
         
         book_intro += formatted_intro
         
@@ -213,6 +218,11 @@ async def get_resources(request: Request):
         book_id = str(body.get("bookId", "69_43977")).strip()
         logger.info(f"🔔 实时目录抓取与AES加密: bookId={book_id}")
         
+        # 0. 快速拉取详情以取得最新章节名与真实更新时间，避免向 18 个备用源发起慢速网络请求导致超时！
+        book_detail = sources_manager.get_book_info(book_id)
+        latest_ch = book_detail.get("latest_ch", "点击开始阅读")
+        latest_update = book_detail.get("latest_update", "实时同步")
+
         # 1. 获取纯数字 ID 与前缀
         raw_id = "673"
         for prefix in ["bqg78_", "69_", "xs_", "bq_"]:
@@ -233,6 +243,9 @@ async def get_resources(request: Request):
             try:
                 # 动态填充 URL 中的占位符
                 res_copy["chapterPageUrl"] = res.get("chapterPageUrl", "").format(raw_id=raw_id, pref=pref)
+                # 动态将镜像源里的最新章节和更新时间，无缝同步为本书最精确的真实数据！完美支撑书架顶部的相对时间渲染！
+                res_copy["sourceLastChapter"] = latest_ch
+                res_copy["sourceLastChapterUpdate"] = latest_update
             except Exception:
                 pass
             resources_list.append(res_copy)

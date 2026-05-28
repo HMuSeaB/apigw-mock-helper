@@ -71,8 +71,9 @@ def crawl_search(keyword: str) -> List[Dict[str, Any]]:
 
 def crawl_info(book_id: str) -> Dict[str, Any]:
     """
-    抓取笔趣阁阁书籍详情 (真实书名、作者、封面与简介)
+    抓取笔趣阁阁书籍详情 (真实书名、作者、封面与简介，且包含动态更新时间)
     """
+    from sources.utils import get_relative_time
     clean_id = book_id.replace("bqg78_", "")
     book_url = f"https://www.bqg78.com/book/{clean_id}/"
     session = get_secure_session()
@@ -84,7 +85,8 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
         "book_author": "未知作者",
         "book_pic": "https://api.mwm.moe/ycy",
         "book_intro": "暂无简介",
-        "latest_ch": "点击开始阅读"
+        "latest_ch": "点击开始阅读",
+        "latest_update": "刚刚"
     }
     
     try:
@@ -93,7 +95,7 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
         if response.status_code == 200:
             html = response.text
             
-            # 解析书名、作者、封面、简介、最新章节
+            # 解析书名、作者、封面、简介、最新章节、最新更新时间
             name_match = re.search(r'<div\s+class\s*=\s*"info">.*?<h1>(.*?)</h1>', html, re.S)
             author_match = re.search(r'<div\s+class\s*=\s*"info">.*?作者：(.*?)</div>', html, re.S)
             cover_match = re.search(r'<div\s+class\s*=\s*"bookimg">.*?<img\s+src\s*=\s*"([^"]+)"', html, re.S)
@@ -104,6 +106,10 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
             latest_match = re.search(r'property="og:novel:latest_chapter_name"\s+content="(.*?)"', html)
             if not latest_match:
                 latest_match = re.search(r'最新章节：<a[^>]*>(.*?)</a>', html)
+                
+            update_match = re.search(r'property="og:novel:update_time"\s+content="(.*?)"', html)
+            if not update_match:
+                update_match = re.search(r'更新时间：\s*(.*?)(?:<|$)', html)
                 
             if name_match:
                 detail["book_name"] = name_match.group(1).strip()
@@ -120,6 +126,9 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
                 detail["book_intro"] = clean_content_text(intro_match.group(1))
             if latest_match:
                 detail["latest_ch"] = latest_match.group(1).strip()
+            if update_match:
+                raw_time = update_match.group(1).strip()
+                detail["latest_update"] = get_relative_time(raw_time)
         else:
             logger.warning(f"⚠️ [bqg78] 获取详情页失败，状态码: {response.status_code}")
     except Exception as e:

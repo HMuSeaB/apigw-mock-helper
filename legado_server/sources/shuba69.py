@@ -105,8 +105,9 @@ def crawl_search(keyword: str) -> List[Dict[str, Any]]:
 
 def crawl_info(book_id: str) -> Dict[str, Any]:
     """
-    实时去 69书吧 爬取书籍详情
+    实时去 69书吧 爬取书籍详情 (含动态更新时间)
     """
+    from sources.utils import get_relative_time
     raw_id = book_id.replace("69_", "")
     book_url = f"https://www.69shuba.com/book/{raw_id}.htm"
     session = get_secure_session()
@@ -118,7 +119,8 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
         "book_author": "未知作者",
         "book_pic": "https://api.mwm.moe/ycy",
         "book_intro": "暂无简介",
-        "latest_ch": "点击开始阅读"
+        "latest_ch": "点击开始阅读",
+        "latest_update": "刚刚"
     }
     
     try:
@@ -135,6 +137,10 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
         latest_match = re.search(r'最新章节：<a[^>]*>(.*?)</a>', html)
         if not latest_match:
             latest_match = re.search(r'property="og:novel:latest_chapter_name"\s+content="(.*?)"', html)
+            
+        update_match = re.search(r'property="og:novel:update_time"\s+content="(.*?)"', html)
+        if not update_match:
+            update_match = re.search(r'更新时间：\s*(.*?)(?:<|$)', html)
         
         if name_match:
             detail["book_name"] = name_match.group(1).strip()
@@ -146,6 +152,9 @@ def crawl_info(book_id: str) -> Dict[str, Any]:
             detail["book_intro"] = clean_content_text(intro_match.group(1))
         if latest_match:
             detail["latest_ch"] = latest_match.group(1).strip()
+        if update_match:
+            raw_time = update_match.group(1).strip()
+            detail["latest_update"] = get_relative_time(raw_time)
     except Exception as e:
         logger.error(f"❌ [shuba69] 抓取 69书吧 详情异常: {str(e)}")
         

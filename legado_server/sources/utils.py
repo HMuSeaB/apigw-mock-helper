@@ -93,3 +93,64 @@ def clean_content_text(html_text: str) -> str:
             clean_lines.append(f"　　{stripped}")  # 加上两个全角空格的首行缩进
             
     return "\n\n".join(clean_lines)
+
+
+def get_relative_time(time_str: str) -> str:
+    """
+    将绝对时间字符串 (如 2023-10-21 23:53:14) 动态转换为人性化相对时间差 (如 9个月前, 3天前)
+    """
+    from datetime import datetime
+    time_str = str(time_str).strip()
+    if not time_str:
+        return "未知时间"
+    
+    # 如果本身就是相对时间描述（比如包含"前"、"刚刚"、"天"），直接原样返回
+    if any(x in time_str for x in ["前", "刚刚", "小时", "天", "月", "年"]):
+        return time_str
+        
+    # 定义常见的日期格式模板
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+    ]
+    
+    dt = None
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(time_str, fmt)
+            break
+        except ValueError:
+            continue
+            
+    if not dt:
+        # 兜底：如果完全不是标准日期（如 "实时同步"），直接安全返回原样
+        return time_str
+        
+    # 计算时间差
+    now = datetime.now()
+    diff = now - dt
+    
+    # 差值为负数（比如网页更新时间写成了未来的时间，或是本地时区误差），防错处理返回“刚刚”
+    if diff.total_seconds() < 0:
+        return "刚刚"
+        
+    days = diff.days
+    if days >= 365:
+        return f"{days // 365}年前"
+    elif days >= 30:
+        return f"{days // 30}个月前"
+    elif days >= 1:
+        return f"{days}天前"
+        
+    seconds = diff.seconds
+    if seconds >= 3600:
+        return f"{seconds // 3600}小时前"
+    elif seconds >= 60:
+        return f"{seconds // 60}分钟前"
+    
+    return "刚刚"
+
