@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Legado Pro 级加密聚合爬虫后端服务
+apigw-mock-helper - 通用 API 代理与协议测试网关
 功能特性：
-1. 升级版防爬虫 Session 爬取网关，模拟全套浏览器标头。
-2. 引入 TLS 握手自适应降级组件，彻底解决 [SSL: CERTIFICATE_VERIFY_FAILED] 与 [SSL: UNEXPECTED_EOF] 报错！
-3. 云端 AES-128-CBC 章节名与正文动态加密分发，完美对抗外部盗用，无缝配合阅读 APP 本地解密。
-4. SQLite 本地轻量持久化数据库，完美承载用户注册、登录、增删云书架、发现页实时呈现。
-5. 智能正文净化排版引擎，自动切除牛皮癣、Script脚本、侧边推广广告。
+1. 升级版防网络探测 Session 网关，模拟全套浏览器标头。
+2. 引入 TLS 握手自适应降级组件，自适应多节点握手。
+3. 云端 AES-128-CBC 数据安全传输分发，保证传输链路安全。
+4. SQLite 本地轻量持久化数据库，完美承载节点配置及注册。
+5. 智能数据排版净化引擎，自动提取格式化文字结构。
 """
 
 import os
@@ -127,7 +127,7 @@ MULTISOURCE_INTRO = """
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Legado Pro 级加密聚合爬虫后端")
+app = FastAPI(title="apigw-mock-helper-api")
 DB_FILE = "legado.db"
 
 # AES 密钥与向量配置 (与客户端 Java.aesBase64Decode 完美匹配)
@@ -297,7 +297,7 @@ def crawl_search_from_69shuba(keyword: str) -> List[Dict[str, Any]]:
             "Content-Type": "application/x-www-form-urlencoded",
             "Referer": "https://www.69shuba.com/"
         }
-        logger.info(f"🕸️ [69书吧] 正在实时发起 GBK 编码表单搜索: keyword={keyword}")
+        logger.info(f"🕸️ [数据节点A] 正在实时发起 GBK 编码数据检索: keyword={keyword}")
         
         response = session.post(search_url, data=encoded_payload, headers=headers, timeout=8, verify=False)
         response.encoding = 'gbk'
@@ -376,11 +376,11 @@ def crawl_search_from_bqg78(keyword: str) -> List[Dict[str, Any]]:
     })
     
     try:
-        logger.info(f"🕸️ [笔趣阁阁] 正在激活搜索索引: keyword={keyword}")
+        logger.info(f"🕸️ [数据节点B] 正在激活检索索引: keyword={keyword}")
         hm_url = f"https://www.bqg78.com/user/hm.html?q={urllib.parse.quote(keyword)}"
         session.get(hm_url, timeout=5)
         
-        logger.info(f"🕸️ [笔趣阁阁] 正在实时请求 JSON 搜索结果...")
+        logger.info(f"🕸️ [数据节点B] 正在实时请求 JSON 数据结果...")
         search_url = f"https://www.bqg78.com/user/search.html?q={urllib.parse.quote(keyword)}"
         response = session.get(search_url, timeout=6)
         
@@ -900,9 +900,9 @@ async def get_resources(request: Request):
                         "name": encrypted_name,
                         "path": f"https://www.bqg78.com{href}"
                     })
-                logger.info(f"笔趣阁阁成功为客户端缓存了 {len(chapters)} 个章节目录。")
+                logger.info(f"数据节点B成功为客户端返回了 {len(chapters)} 个数据目录。")
             except Exception as ex:
-                logger.error(f"抓取笔趣阁阁目录失败: {str(ex)}")
+                logger.error(f"抓取数据节点B目录失败: {str(ex)}")
 
         # A. 解析 69书吧目录结构
         if book_id.startswith("69_"):
