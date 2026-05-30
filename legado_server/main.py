@@ -80,8 +80,17 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             """)
+            # 升级已有表字段 (添加对齐ID)
+            try:
+                cursor.execute("ALTER TABLE sheets ADD COLUMN aligned_bq_id TEXT")
+            except sqlite3.OperationalError:
+                pass # 列已存在
+            try:
+                cursor.execute("ALTER TABLE sheets ADD COLUMN aligned_69_id TEXT")
+            except sqlite3.OperationalError:
+                pass # 列已存在
             conn.commit()
-            logger.info("SQLite 数据库初始化及建表成功。")
+            logger.info("SQLite 数据库初始化及建表及平滑升级成功。")
     except Exception as e:
         logger.error(f"初始化数据库失败: {str(e)}")
 
@@ -349,66 +358,91 @@ async def get_resources(request: Request):
         except ValueError:
             pref = "0"
             
-        # 开启国防级全局双向 ID 智能自愈与对齐对齐系统 (支持缓存加速)
+        # 开启国防级全局双向 ID 智能自愈与对齐系统 (支持数据库物理级别自愈 + 内存缓存加速)
         book_name = book_detail.get("book_name", "").strip()
         aligned_bq_raw_id = raw_id
         aligned_bq_pref = pref
         aligned_69_raw_id = raw_id
-        
-        if not book_id.startswith("69_"):
-            # 主源为笔趣阁类，其本身的 ID 体系代表笔趣阁 ID，我们要去检索 69 书吧 ID 以供换源 69 时使用
-            aligned_bq_raw_id = raw_id
-            aligned_bq_pref = pref
-            cache_key = f"{book_name}_69"
-            if cache_key in ID_ALIGNMENT_CACHE:
-                aligned_69_raw_id = ID_ALIGNMENT_CACHE[cache_key]
-            else:
-                try:
-                    if book_name:
-                        logger.info(f"🔄 [align] 正在为笔趣阁主源智能检索 69 书吧对齐 ID: '{book_name}'")
-                        from sources import shuba69
-                        search_results = shuba69.crawl_search(book_name)
-                        for b in search_results:
-                            if b.get("book_name", "").strip() == book_name:
-                                b_id = b.get("book_id", "")
-                                if b_id.startswith("69_"):
-                                    aligned_69_raw_id = b_id.replace("69_", "")
-                                    ID_ALIGNMENT_CACHE[cache_key] = aligned_69_raw_id
-                                    logger.info(f"🎯 [align] 成功将笔趣阁 ID '{raw_id}' 对齐至 69 书吧真实 ID '{aligned_69_raw_id}'！")
-                                    break
-                except Exception as align_err:
-                    logger.warning(f"⚠️ [align] 检索 69 书吧对齐 ID 发生异常: {str(align_err)}")
+
+        # A. 优先从 SQLite sheets 数据库中拉取固化物理对齐 ID
+        db_aligned_bq_id = ""
+        db_aligned_69_id = ""
+        try:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT aligned_bq_id, aligned_69_id FROM sheets WHERE book_id = ?", (book_id,))
+                row = cursor.fetchone()
+                if row:
+                    db_aligned_bq_id = row[0] or ""
+                    db_aligned_69_id = row[1] or ""
+        except Exception as db_err:
+            logger.warning(f"⚠️ [align] 读取 SQLite 物理对齐 ID 异常: {str(db_err)}")
+
+        if db_aligned_bq_id and db_aligned_69_id:
+            logger.info(f"🎯 [align] 成功从 SQLite 提取固化物理对齐 ID: bq='{db_aligned_bq_id}', 69='{db_aligned_69_id}'")
+            aligned_bq_raw_id = db_aligned_bq_id
+            aligned_69_raw_id = db_aligned_69_id
+            try:
+                val_id = int(aligned_bq_raw_id)
+                aligned_bq_pref = str(val_id // 1000)
+            except ValueError:
+                aligned_bq_pref = "0"
         else:
-            # 主源为 69 书吧，其本身的 ID 体系代表 69 书吧 ID，我们要去检索笔趣阁 ID 以供换源备用源时使用
-            aligned_69_raw_id = raw_id
-            cache_key = f"{book_name}_bq"
-            if cache_key in ID_ALIGNMENT_CACHE:
-                aligned_bq_raw_id = ID_ALIGNMENT_CACHE[cache_key]
-                try:
-                    val_id = int(aligned_bq_raw_id)
-                    aligned_bq_pref = str(val_id // 1000)
-                except ValueError:
-                    aligned_bq_pref = "0"
+            # B. 降级走内存缓存与网络动态自愈
+            if not book_id.startswith("69_"):
+                # 主源为笔趣阁类，其本身的 ID 体系代表笔趣阁 ID，我们要去检索 69 书吧 ID 以供换源 69 时使用
+                aligned_bq_raw_id = raw_id
+                aligned_bq_pref = pref
+                cache_key = f"{book_name}_69"
+                if cache_key in ID_ALIGNMENT_CACHE:
+                    aligned_69_raw_id = ID_ALIGNMENT_CACHE[cache_key]
+                else:
+                    try:
+                        if book_name:
+                            logger.info(f"🔄 [align] 正在为笔趣阁主源智能检索 69 书吧对齐 ID: '{book_name}'")
+                            from sources import shuba69
+                            search_results = shuba69.crawl_search(book_name)
+                            for b in search_results:
+                                if b.get("book_name", "").strip() == book_name:
+                                    b_id = b.get("book_id", "")
+                                    if b_id.startswith("69_"):
+                                        aligned_69_raw_id = b_id.replace("69_", "")
+                                        ID_ALIGNMENT_CACHE[cache_key] = aligned_69_raw_id
+                                        logger.info(f"🎯 [align] 成功将笔趣阁 ID '{raw_id}' 对齐至 69 书吧真实 ID '{aligned_69_raw_id}'！")
+                                        break
+                    except Exception as align_err:
+                        logger.warning(f"⚠️ [align] 检索 69 书吧对齐 ID 发生异常: {str(align_err)}")
             else:
-                try:
-                    if book_name:
-                        logger.info(f"🔄 [align] 正在为 69 书吧主源智能检索笔趣阁对齐 ID: '{book_name}'")
-                        search_results = bqg78.crawl_search(book_name)
-                        for b in search_results:
-                            if b.get("book_name", "").strip() == book_name:
-                                bq_id = b.get("book_id", "")
-                                if bq_id.startswith("bqg78_"):
-                                    aligned_bq_raw_id = bq_id.replace("bqg78_", "")
-                                    ID_ALIGNMENT_CACHE[cache_key] = aligned_bq_raw_id
-                                    try:
-                                        val_id = int(aligned_bq_raw_id)
-                                        aligned_bq_pref = str(val_id // 1000)
-                                    except ValueError:
-                                        aligned_bq_pref = "0"
-                                    logger.info(f"🎯 [align] 成功将 69 书吧 ID '{raw_id}' 对齐至笔趣阁真实 ID '{aligned_bq_raw_id}' (pref={aligned_bq_pref})！")
-                                    break
-                except Exception as align_err:
-                    logger.warning(f"⚠️ [align] 检索笔趣阁对齐 ID 发生异常: {str(align_err)}")
+                # 主源为 69 书吧，其本身的 ID 体系代表 69 书吧 ID，我们要去检索笔趣阁 ID 以供换源备用源时使用
+                aligned_69_raw_id = raw_id
+                cache_key = f"{book_name}_bq"
+                if cache_key in ID_ALIGNMENT_CACHE:
+                    aligned_bq_raw_id = ID_ALIGNMENT_CACHE[cache_key]
+                    try:
+                        val_id = int(aligned_bq_raw_id)
+                        aligned_bq_pref = str(val_id // 1000)
+                    except ValueError:
+                        aligned_bq_pref = "0"
+                else:
+                    try:
+                        if book_name:
+                            logger.info(f"🔄 [align] 正在为 69 书吧主源智能检索笔趣阁对齐 ID: '{book_name}'")
+                            search_results = bqg78.crawl_search(book_name)
+                            for b in search_results:
+                                if b.get("book_name", "").strip() == book_name:
+                                    bq_id = b.get("book_id", "")
+                                    if bq_id.startswith("bqg78_"):
+                                        aligned_bq_raw_id = bq_id.replace("bqg78_", "")
+                                        ID_ALIGNMENT_CACHE[cache_key] = aligned_bq_raw_id
+                                        try:
+                                            val_id = int(aligned_bq_raw_id)
+                                            aligned_bq_pref = str(val_id // 1000)
+                                        except ValueError:
+                                            aligned_bq_pref = "0"
+                                        logger.info(f"🎯 [align] 成功将 69 书吧 ID '{raw_id}' 对齐至笔趣阁真实 ID '{aligned_bq_raw_id}' (pref={aligned_bq_pref})！")
+                                        break
+                    except Exception as align_err:
+                        logger.warning(f"⚠️ [align] 检索笔趣阁对齐 ID 发生异常: {str(align_err)}")
 
         # 检测是否为带端口的 IP 访问，规避手机客户端对于端口号冒号的正则匹配闪退缺陷
         host = request.headers.get("host", "")
@@ -488,25 +522,8 @@ async def get_resources(request: Request):
             except Exception:
                 pass
         
-        # 4. 根据访问模式决定下发的资源列表，实现服务端智能闭环兼容
-        if is_port_access:
-            # 带端口 IP 访问时：下发完全没有端口冒号的 18 个镜像源真实直连列表，客户端完全直连秒开，彻底永不闪退！
-            final_resources = resources_list
-        else:
-            # 域名或 80/443 访问时：下发唯一一个虚拟自建源，走高级云端破盾代理与去广告清洗！
-            cloud_resource = {
-                "sourceName": "cloud.proxy",
-                "sourceDesc": "自建云端极速中转",
-                "sourceLastChapter": latest_ch,
-                "sourceLastChapterUpdate": latest_update,
-                "encoded": "utf-8",
-                "chapterPageUrl": f"{gateway_url}/api.php/Book/getResources?bookId={book_id}",
-                "chapterPageBeat": {"rule": ""},
-                "chapterUrl": {"rule": "href"},
-                "chapterName": {"rule": "text"},
-                "chapterText": {"rule": "id.content", "replace": ""}
-            }
-            final_resources = [cloud_resource]
+        # 4. 无论何种访问模式，均下发完整的 19 个备用源配置，100% 避免因客户端序号越界导致闪退崩溃
+        final_resources = resources_list
         
         return JSONResponse(content={
             "msg": "Success",
@@ -672,14 +689,59 @@ async def add_sheet(request: Request, uid: str = Header(None), token: str = Head
         if len(book_intro) > 300:
             book_intro = book_intro[:300] + "..."
 
-        logger.info(f"用户 UID={user_id} 添加书籍 ID={book_id} 到云端书架")
+        # 自动对齐本小说的笔趣阁ID和69书吧ID，固化写入 SQLite 云书架，永保0毫秒免检对齐
+        aligned_bq_id = ""
+        aligned_69_id = ""
+        
+        # 提取当前纯数字 ID
+        raw_id = ""
+        for prefix in ["bqg78_", "69_", "xs_", "bq_"]:
+            if book_id.startswith(prefix):
+                raw_id = book_id.replace(prefix, "")
+                break
+        if not raw_id:
+            raw_id = book_id
+
+        if not book_id.startswith("69_"):
+            # 当前为主源笔趣阁类，其本身就是笔趣阁通用 ID，去检索 69 书吧 ID 对齐
+            aligned_bq_id = raw_id
+            try:
+                if book_name:
+                    logger.info(f"🔄 [addSheet] 正在为新加书籍 '{book_name}' 物理对齐 69 书吧 ID")
+                    from sources import shuba69
+                    search_results = shuba69.crawl_search(book_name)
+                    for b in search_results:
+                        if b.get("book_name", "").strip() == book_name:
+                            b_id = b.get("book_id", "")
+                            if b_id.startswith("69_"):
+                                aligned_69_id = b_id.replace("69_", "")
+                                break
+            except Exception as e:
+                logger.warning(f"⚠️ [addSheet] 对齐 69 书吧 ID 失败: {e}")
+        else:
+            # 当前为 69 书吧主源，去检索笔趣阁 ID 对齐
+            aligned_69_id = raw_id
+            try:
+                if book_name:
+                    logger.info(f"🔄 [addSheet] 正在为新加书籍 '{book_name}' 物理对齐笔趣阁 ID")
+                    search_results = bqg78.crawl_search(book_name)
+                    for b in search_results:
+                        if b.get("book_name", "").strip() == book_name:
+                            bq_id = b.get("book_id", "")
+                            if bq_id.startswith("bqg78_"):
+                                aligned_bq_id = bq_id.replace("bqg78_", "")
+                                break
+            except Exception as e:
+                logger.warning(f"⚠️ [addSheet] 对齐笔趣阁 ID 失败: {e}")
+
+        logger.info(f"用户 UID={user_id} 添加书籍 ID={book_id} 到云端书架 (对齐ID: bq='{aligned_bq_id}', 69='{aligned_69_id}')")
 
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT INTO sheets (user_id, book_id, book_name, book_author, book_pic, book_intro, toc_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (user_id, book_id, book_name, book_author, book_pic, book_intro, "")
+                    "INSERT INTO sheets (user_id, book_id, book_name, book_author, book_pic, book_intro, toc_url, aligned_bq_id, aligned_69_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, book_id, book_name, book_author, book_pic, book_intro, "", aligned_bq_id, aligned_69_id)
                 )
                 conn.commit()
                 return JSONResponse(content={"msg": "Success", "code": 0})
