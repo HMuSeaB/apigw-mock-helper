@@ -120,7 +120,7 @@ def crawl_content(url: str) -> str:
         response.encoding = 'utf-8'
         html = response.text
         
-        content_block = re.search(r'<div id="content">(.*?)</div>', html, re.S)
+        content_block = re.search(r'<div id="content">(?:<div id="content_tip">.*?</div>)?(.*?)</div>', html, re.S)
         if content_block:
             clean_text = clean_content_text(content_block.group(1))
     except Exception as e:

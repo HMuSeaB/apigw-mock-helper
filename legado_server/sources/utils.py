@@ -78,8 +78,9 @@ def clean_content_text(html_text: str) -> str:
     html_text = re.sub(r'<p>', '\n', html_text, flags=re.I)
     html_text = re.sub(r'</p>', '', html_text, flags=re.I)
     
-    # 3. 剥离剩余所有残余网页 HTML 标签
+    # 3. 剥离剩余所有残余网页 HTML 标签并解码 HTML 实体字符，让正文排版清爽、绝无转义噪音！
     html_text = re.sub(r'<.*?>', '', html_text, flags=re.S)
+    html_text = html_text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", '"')
     
     # 4. 清理牛皮癣文字广告 (增强版正则，覆盖更多常见盗版垃圾内容)
     html_text = re.sub(r'(?i)一秒记住.*|请收藏本站.*|本章未完.*|记住网址.*|为您提供.*|最新最快更新.*|无广告.*', '', html_text)

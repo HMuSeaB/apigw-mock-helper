@@ -231,23 +231,34 @@ async def get_book_info(request: Request):
     二、 书籍详情 API (提供实时原站信息匹配与备用换源指引拼装，完美支持动态更新时间同步)
     """
     try:
-        body = await request.json()
-        book_id = str(body.get("bookId", "69_43977")).strip()
+        try:
+            body = await request.json()
+            book_id = str(body.get("bookId", "69_43977")).strip()
+        except Exception:
+            book_id = request.query_params.get("bookId", "69_43977").strip()
+            
         logger.info(f"🔔 详情页获取: bookId={book_id}")
         
-        # 调度模块层获取各大源站的真实图书数据 (书名、作者、封面与简介)
-        book_detail = sources_manager.get_book_info(book_id)
-        
-        book_name = book_detail["book_name"]
-        book_author = book_detail["book_author"]
-        book_pic = book_detail["book_pic"]
-        book_intro = book_detail["book_intro"]
-        latest_ch = book_detail["latest_ch"]
-        latest_update = book_detail.get("latest_update", "实时同步")
+        # 调度模块层获取各大源站的真实图书数据 (并提供极致的 try-except 安全保护，防止抛出 500)
+        try:
+            book_detail = sources_manager.get_book_info(book_id)
+            book_name = book_detail.get("book_name", "精选多源小说")
+            book_author = book_detail.get("book_author", "多源聚合")
+            book_pic = book_detail.get("book_pic", "https://api.mwm.moe/ycy")
+            book_intro = book_detail.get("book_intro", "实时中转及云备份服务")
+            latest_ch = book_detail.get("latest_ch", "开始阅读")
+            latest_update = book_detail.get("latest_update", "实时更新")
+        except Exception as crawl_err:
+            logger.warning(f"⚠️ 调度模块获取图书详情失败: {str(crawl_err)}，启动安全兜底机制")
+            book_name = "自建云聚合小说"
+            book_author = "多源聚合"
+            book_pic = "https://api.mwm.moe/ycy"
+            book_intro = "📂 智能云中转极速解析服务。"
+            latest_ch = "开始阅读"
+            latest_update = "实时同步中"
 
         # 将 18 个镜像站的配置指引动态格式化并追加到简介尾部，展现真实小说的最新状态！
         try:
-            # 支持动态渲染章节与更新时间差，做到与截图一模一样的人性化时间差显示！
             formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch, latest_update=latest_update)
         except Exception:
             try:
@@ -256,6 +267,25 @@ async def get_book_info(request: Request):
                 formatted_intro = MULTISOURCE_INTRO
         
         book_intro += formatted_intro
+        
+        # 计算不带端口号的安全物理直连目录链接，作为手机端最后的 fallback 安全气囊，彻底消除闪退可能！
+        raw_id = "673"
+        for prefix in ["bqg78_", "69_", "xs_", "bq_"]:
+            if book_id.startswith(prefix):
+                raw_id = book_id.replace(prefix, "")
+                break
+                
+        try:
+            val_id = int(raw_id)
+            pref = str(val_id // 1000)
+        except ValueError:
+            pref = "0"
+            
+        fallback_toc_url = f"https://www.bqg78.com/book/{raw_id}/"
+        if book_id.startswith("69_"):
+            fallback_toc_url = f"https://www.69shuba.tw/book/{raw_id}.htm"
+        elif book_id.startswith("xs_"):
+            fallback_toc_url = f"https://www.ibiquges.org/{pref}/{raw_id}/"
         
         return JSONResponse(content={
             "msg": "Success",
@@ -267,6 +297,7 @@ async def get_book_info(request: Request):
                     "book_author": book_author,
                     "book_pic": book_pic,
                     "book_intro": book_intro,
+                    "tocUrl": fallback_toc_url,  # 注入无端口直连 fallback_toc_url
                     "categoryName": "实时云聚合"
                 }
             }
@@ -276,7 +307,7 @@ async def get_book_info(request: Request):
         return JSONResponse(status_code=500, content={"msg": str(e), "code": -1})
 
 
-@app.post("/api.php/Book/getResources")
+@app.api_route("/api.php/Book/getResources", methods=["GET", "POST"])
 async def get_resources(request: Request):
     """
     三、 核心 API：获取书籍的实时目录并对其下发 AES-128-CBC 加密包
@@ -284,9 +315,17 @@ async def get_resources(request: Request):
     章节名称 ruleToc.chapterName 会配合本地 Rhino 用密码 Pxga!h*e4@T8xfOm 解密章节名字。
     """
     try:
-        body = await request.json()
-        book_id = str(body.get("bookId", "69_43977")).strip()
-        logger.info(f"🔔 实时目录抓取与AES加密: bookId={book_id}")
+        book_id = "69_43977"
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                book_id = str(body.get("bookId", book_id)).strip()
+            except Exception:
+                book_id = request.query_params.get("bookId", book_id).strip()
+        else:
+            book_id = request.query_params.get("bookId", book_id).strip()
+
+        logger.info(f"🔔 实时目录抓取与AES加密 ({request.method}): bookId={book_id}")
         
         # 0. 快速拉取详情以取得最新章节名与真实更新时间，避免向 18 个备用源发起慢速网络请求导致超时！
         book_detail = sources_manager.get_book_info(book_id)
@@ -306,29 +345,104 @@ async def get_resources(request: Request):
         except ValueError:
             pref = "0"
             
-        # 2. 从本地加载并格式化 18 个全网最强小说镜像源
+        # 检测是否为带端口的 IP 访问，规避手机客户端对于端口号冒号的正则匹配闪退缺陷
+        host = request.headers.get("host", "")
+        is_port_access = ":" in host
+        logger.info(f"🔍 访问模式检测: host={host}, is_port_access={is_port_access}")
+
+        # 2. 从本地加载并格式化 19 个全网最强小说镜像源
         resources_list = []
+        gateway_url = str(request.base_url).rstrip("/")
         for res in EXTERNAL_RESOURCES:
             res_copy = dict(res)
             try:
-                # 动态填充 URL 中的占位符
-                res_copy["chapterPageUrl"] = res.get("chapterPageUrl", "").format(raw_id=raw_id, pref=pref)
-                # 动态将镜像源里的最新章节和更新时间，无缝同步为本书最精确的真实数据！完美支撑书架顶部的相对时间渲染！
+                # 强行在内存中硬重写升级提取正则，彻底根治 1Panel/Docker 单文件挂载 inode 冲突导致 sources.json 同步失败的隐患！
+                res_copy["chapterUrl"] = {"rule": 'href\\s*=\\s*["\']((?!https?:)[^"\']*/\\d+\\.html?)["\']'}
+                res_copy["chapterName"] = {"rule": 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*/\\d+\\.html?["\']?[^>]*>([^<]+)</a>'}
+
+                # 动态填充 URL 中的所有占位符
+                raw_url = res.get("chapterPageUrl", "")
+                if is_port_access:
+                    # 如果是带端口访问，为了彻底防止手机端正则闪退，将代理链接恢复为真实的没有端口号的物理直连链接
+                    formatted_url = raw_url.replace("{gateway_url}/proxy/", "https://")
+                else:
+                    formatted_url = raw_url.replace("{gateway_url}", gateway_url)
+                
+                formatted_url = formatted_url.replace("{raw_id}", raw_id).replace("{pref}", pref)
+                res_copy["chapterPageUrl"] = formatted_url
+                # 动态将镜像源里的最新章节和更新时间，无缝同步为本书最精确的真实数据！
                 res_copy["sourceLastChapter"] = latest_ch
                 res_copy["sourceLastChapterUpdate"] = latest_update
             except Exception:
                 pass
             resources_list.append(res_copy)
 
-        # 3. 调度爬虫获取加密后的目录结构
-        chapters = sources_manager.get_chapters(book_id)
+        # 3. 调度爬虫获取目录结构，并强力将章节链接透明中转至网关 (增加 try-except 强力保护，防止异常爆 500 导致闪退)
+        try:
+            raw_chapters = sources_manager.get_chapters(book_id)
+        except Exception as crawl_ch_err:
+            logger.warning(f"⚠️ 调度模块获取章节列表失败: {str(crawl_ch_err)}，启动安全空列表兜底保护")
+            raw_chapters = []
+
+        gateway_url = str(request.base_url).rstrip("/")
+        
+        final_chapters = []
+        for ch in raw_chapters:
+            try:
+                ch_copy = dict(ch)
+                original_path = ch.get('path', '').strip()
+                
+                # 智能剥离章节链接中的协议与域名部分，使其彻底转化为以 "/" 开头的规范相对路径
+                # 这样可以 100% 契合客户端 JS 的 "sourceUrl1 + uri" 粗暴拼接规则，彻底消灭双重 http 粘连与 UnknownHost 异常！
+                cleaned_path = original_path
+                if cleaned_path.startswith(("http://", "https://")):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(cleaned_path)
+                    cleaned_path = parsed.path
+                    if parsed.query:
+                        cleaned_path += f"?{parsed.query}"
+                
+                # 确保清洗后的路径一定以 "/" 开头，强制走客户端的 baseUrl 正确域拼接分支
+                if not cleaned_path.startswith("/"):
+                    cleaned_path = "/" + cleaned_path
+                
+                if is_port_access:
+                    # 如果是带端口访问，应用户要求并且为了彻底消除代理导致的相对路径解析错误，章节 path 降级为真实的物理直连相对 URL！
+                    ch_copy["path"] = cleaned_path
+                else:
+                    # 域名访问下也使用不带域名的相对中转链接，由客户端 JS 拼接网关域名，完美防止双重域名粘连！
+                    ch_copy["path"] = f"/api.php/Book/getRealContent?url={cleaned_path}"
+                
+                final_chapters.append(ch_copy)
+            except Exception:
+                pass
+        
+        # 4. 根据访问模式决定下发的资源列表，实现服务端智能闭环兼容
+        if is_port_access:
+            # 带端口 IP 访问时：下发完全没有端口冒号的 18 个镜像源真实直连列表，客户端完全直连秒开，彻底永不闪退！
+            final_resources = resources_list
+        else:
+            # 域名或 80/443 访问时：下发唯一一个虚拟自建源，走高级云端破盾代理与去广告清洗！
+            cloud_resource = {
+                "sourceName": "cloud.proxy",
+                "sourceDesc": "自建云端极速中转",
+                "sourceLastChapter": latest_ch,
+                "sourceLastChapterUpdate": latest_update,
+                "encoded": "utf-8",
+                "chapterPageUrl": f"{gateway_url}/api.php/Book/getResources?bookId={book_id}",
+                "chapterPageBeat": {"rule": ""},
+                "chapterUrl": {"rule": "href"},
+                "chapterName": {"rule": "text"},
+                "chapterText": {"rule": "id.content", "replace": ""}
+            }
+            final_resources = [cloud_resource]
         
         return JSONResponse(content={
             "msg": "Success",
             "code": 0,
             "data": {
-                "chapters": chapters,
-                "resources": resources_list
+                "chapters": final_chapters,
+                "resources": final_resources
             }
         })
     except Exception as e:
@@ -336,23 +450,46 @@ async def get_resources(request: Request):
         return JSONResponse(status_code=500, content={"msg": str(e), "code": -1})
 
 
-@app.post("/api.php/Book/getRealContent")
+@app.api_route("/api.php/Book/getRealContent", methods=["GET", "POST"])
 async def get_real_content(request: Request):
     """
-    四、 核心 API：实时拉取正文、广告智能净化清洗并进行云端 AES-128-CBC 加密分发
+    四、 核心 API：实时拉取正文、广告智能净化清洗与云端透明中转网关 (兼容 GET 纯 HTML 输出)
     """
     try:
+        # A. 针对手机端直接 GET 请求章节正文代理 (透明中转免盾秒开轨)
+        if request.method == "GET":
+            url = request.query_params.get("url", "").strip()
+            logger.info(f"🔔 [GET] 实时正文代理抓取净化: URL={url}")
+            if not url:
+                return HTMLResponse(content="未指定有效的正文链接参数", status_code=400)
+                
+            # 调度云端爬虫爬取并智能净化
+            clean_text = sources_manager.get_content(url)
+            
+            # 直接以精美的极简 HTML 包裹正文返回，让手机客户端用 id="content" 或 java.getElement 完美提取！
+            html_template = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Proxy Content</title>
+            </head>
+            <body>
+                <div id="content">{clean_text}</div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_template, status_code=200)
+            
+        # B. 针对自建接口常规 POST 的 JSON 数据分发轨
         body = await request.json()
         url = body.get("url", "").strip()
-        logger.info(f"🔔 实时抓取正文、净化与AES加密: URL={url}")
+        logger.info(f"🔔 [POST] 实时抓取正文、净化与AES加密: URL={url}")
         
         if not url:
             return JSONResponse(content={"msg": "未指定正文链接参数", "code": -1})
             
-        # 调度多源模块爬取并清洗正文
         clean_text = sources_manager.get_content(url)
-        
-        # 对净化后的正文文字进行 AES 加密
         encrypted_text = aes_encrypt_base64(clean_text)
         
         return JSONResponse(content={
@@ -363,7 +500,9 @@ async def get_real_content(request: Request):
             }
         })
     except Exception as e:
-        logger.error(f"正文抓取加密接口发生异常: {str(e)}")
+        logger.error(f"正文抓取代理接口发生异常: {str(e)}")
+        if request.method == "GET":
+            return HTMLResponse(content=f"正文代理服务发生内部异常: {str(e)}", status_code=500)
         return JSONResponse(status_code=500, content={"msg": str(e), "code": -1})
 
 
@@ -542,6 +681,70 @@ async def get_sheet(request: Request, uid: str = Header(None), token: str = Head
     except Exception as e:
         logger.error(f"发现页拉取书架失败: {str(e)}")
         return JSONResponse(content={"msg": f"服务端异常: {str(e)}", "code": -1})
+
+
+@app.get("/proxy/{source_domain}/{path:path}")
+async def unified_proxy(source_domain: str, path: str, request: Request):
+    """
+    十、 核心 API：通用云端代理与防爬盾拦截重写网关
+    通过云端 Pro 级 Session 在服务器端 100% 破解 JS 盾与 WAF 防御，并执行 HTML 绝对链接重写，消除客户端域名拼接 Bug。
+    """
+    import re
+    import urllib.parse
+    query_params = dict(request.query_params)
+    query_str = urllib.parse.urlencode(query_params) if query_params else ""
+    
+    target_url = f"https://{source_domain}/{path}"
+    if query_str:
+        target_url += f"?{query_str}"
+        
+    logger.info(f"🕸️ [proxy] 代理拦截并破盾抓取: {target_url}")
+    
+    session = sources_manager.get_secure_session()
+    try:
+        response = session.get(target_url, timeout=10, verify=False)
+        
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "gb2312" in content_type or "gbk" in content_type:
+            response.encoding = 'gbk'
+        else:
+            response.encoding = 'utf-8'
+            
+        html = response.text
+        
+        final_url = str(response.url)
+        final_domain_match = re.search(r'https?://([^/]+)', final_url)
+        final_domain = final_domain_match.group(1) if final_domain_match else source_domain
+        
+        # 如果是目录页面，自动执行 Response Rewriting 重写，重定向域名绝对链接消除拼接 Bug！
+        if not path.endswith((".html", ".htm")):
+            logger.info(f"📝 [proxy] 检测到目录页响应，启动绝对 URL 智能重写，重定向域名: {final_domain}")
+            gateway_base = f"/proxy/{final_domain}/"
+            
+            # 替换带域名的绝对链接
+            html = re.sub(
+                rf'href\s*=\s*["\']https?://{final_domain}/([^"\']+)["\']',
+                rf'href="{gateway_base}\1"',
+                html
+            )
+            if final_domain != source_domain:
+                html = re.sub(
+                    rf'href\s*=\s*["\']https?://{source_domain}/([^"\']+)["\']',
+                    rf'href="{gateway_base}\1"',
+                    html
+                )
+                
+            # 兼容其他可能绝对章节链接
+            html = re.sub(
+                r'href\s*=\s*["\'](https?://[^"\']+\.(?:html|htm))["\']',
+                lambda m: f'href="/proxy/{re.search(r"https?://([^/]+)", m.group(1)).group(1)}/{re.search(r"https?://[^/]+/(.+)", m.group(1)).group(1)}"',
+                html
+            )
+            
+        return HTMLResponse(content=html, status_code=200)
+    except Exception as e:
+        logger.error(f"❌ [proxy] 代理抓取发生严重异常: {str(e)}")
+        return HTMLResponse(content=f"API Gateway Proxy Error: {str(e)}", status_code=500)
 
 
 if __name__ == "__main__":
