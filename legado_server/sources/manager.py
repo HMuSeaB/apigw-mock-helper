@@ -22,25 +22,29 @@ SOURCES_MAP = {
 
 def search_books(keyword: str) -> List[Dict[str, Any]]:
     """
-    全网实时并发去重搜索 API
+    全网实时并发搜索 API (去重合并版，相同书名作者只保留最优质的唯一记录)
     """
     keyword = keyword.strip()
     if not keyword:
         return []
 
-    # 1. 实时爬取两大有搜索功能的站
+    # 1. 实时并发检索 4 大独立小说书库站
     books_bqg78 = bqg78.crawl_search(keyword)
     books_69 = shuba69.crawl_search(keyword)
+    books_xs = ibiquges.crawl_search(keyword)
+    books_bq = xbiquge.crawl_search(keyword)
 
     # 2. 合并搜索结果
-    merged_books = books_69 + books_bqg78
+    merged_books = books_xs + books_bq + books_69 + books_bqg78
 
-    # 3. 去重过滤 (根据书籍名称和作者进行简单合并去重)
+    # 3. 智能去重合并：差不多名字和作者相同即可算为同一本书，只保留第一条最优质的检索记录
     seen = set()
     unique_books = []
     for book in merged_books:
-        # 去除名字中的空格进行唯一判定
-        key = (book["book_name"].replace(" ", ""), book["book_author"].replace(" ", ""))
+        # 统一擦除空格与大小写以进行最精确的去重
+        name_key = book.get("book_name", "").replace(" ", "").lower()
+        author_key = book.get("book_author", "").replace(" ", "").lower()
+        key = (name_key, author_key)
         if key not in seen:
             seen.add(key)
             unique_books.append(book)

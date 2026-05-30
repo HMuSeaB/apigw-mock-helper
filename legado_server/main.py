@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, HTMLResponse
 
 from sources import manager as sources_manager
+from sources import bqg78
 from sources.utils import aes_encrypt_base64
 
 # 1. 基础配置与日志
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="apigw-mock-helper-api")
 DB_FILE = os.path.join(os.path.dirname(__file__), "legado.db")
+
+# 全局多源 ID 智能自愈与对齐缓存字典 (书名 -> {源站: ID})
+ID_ALIGNMENT_CACHE = {}
 
 # ==================== 全局多源备用指引 (本地 sources.json 动态配置) ====================
 MULTISOURCE_INTRO = ""
@@ -345,12 +349,73 @@ async def get_resources(request: Request):
         except ValueError:
             pref = "0"
             
+        # 开启国防级全局双向 ID 智能自愈与对齐对齐系统 (支持缓存加速)
+        book_name = book_detail.get("book_name", "").strip()
+        aligned_bq_raw_id = raw_id
+        aligned_bq_pref = pref
+        aligned_69_raw_id = raw_id
+        
+        if not book_id.startswith("69_"):
+            # 主源为笔趣阁类，其本身的 ID 体系代表笔趣阁 ID，我们要去检索 69 书吧 ID 以供换源 69 时使用
+            aligned_bq_raw_id = raw_id
+            aligned_bq_pref = pref
+            cache_key = f"{book_name}_69"
+            if cache_key in ID_ALIGNMENT_CACHE:
+                aligned_69_raw_id = ID_ALIGNMENT_CACHE[cache_key]
+            else:
+                try:
+                    if book_name:
+                        logger.info(f"🔄 [align] 正在为笔趣阁主源智能检索 69 书吧对齐 ID: '{book_name}'")
+                        from sources import shuba69
+                        search_results = shuba69.crawl_search(book_name)
+                        for b in search_results:
+                            if b.get("book_name", "").strip() == book_name:
+                                b_id = b.get("book_id", "")
+                                if b_id.startswith("69_"):
+                                    aligned_69_raw_id = b_id.replace("69_", "")
+                                    ID_ALIGNMENT_CACHE[cache_key] = aligned_69_raw_id
+                                    logger.info(f"🎯 [align] 成功将笔趣阁 ID '{raw_id}' 对齐至 69 书吧真实 ID '{aligned_69_raw_id}'！")
+                                    break
+                except Exception as align_err:
+                    logger.warning(f"⚠️ [align] 检索 69 书吧对齐 ID 发生异常: {str(align_err)}")
+        else:
+            # 主源为 69 书吧，其本身的 ID 体系代表 69 书吧 ID，我们要去检索笔趣阁 ID 以供换源备用源时使用
+            aligned_69_raw_id = raw_id
+            cache_key = f"{book_name}_bq"
+            if cache_key in ID_ALIGNMENT_CACHE:
+                aligned_bq_raw_id = ID_ALIGNMENT_CACHE[cache_key]
+                try:
+                    val_id = int(aligned_bq_raw_id)
+                    aligned_bq_pref = str(val_id // 1000)
+                except ValueError:
+                    aligned_bq_pref = "0"
+            else:
+                try:
+                    if book_name:
+                        logger.info(f"🔄 [align] 正在为 69 书吧主源智能检索笔趣阁对齐 ID: '{book_name}'")
+                        search_results = bqg78.crawl_search(book_name)
+                        for b in search_results:
+                            if b.get("book_name", "").strip() == book_name:
+                                bq_id = b.get("book_id", "")
+                                if bq_id.startswith("bqg78_"):
+                                    aligned_bq_raw_id = bq_id.replace("bqg78_", "")
+                                    ID_ALIGNMENT_CACHE[cache_key] = aligned_bq_raw_id
+                                    try:
+                                        val_id = int(aligned_bq_raw_id)
+                                        aligned_bq_pref = str(val_id // 1000)
+                                    except ValueError:
+                                        aligned_bq_pref = "0"
+                                    logger.info(f"🎯 [align] 成功将 69 书吧 ID '{raw_id}' 对齐至笔趣阁真实 ID '{aligned_bq_raw_id}' (pref={aligned_bq_pref})！")
+                                    break
+                except Exception as align_err:
+                    logger.warning(f"⚠️ [align] 检索笔趣阁对齐 ID 发生异常: {str(align_err)}")
+
         # 检测是否为带端口的 IP 访问，规避手机客户端对于端口号冒号的正则匹配闪退缺陷
         host = request.headers.get("host", "")
         is_port_access = ":" in host
         logger.info(f"🔍 访问模式检测: host={host}, is_port_access={is_port_access}")
 
-        # 2. 从本地加载并格式化 19 个全网最强小说镜像源
+        # 2. 从本地加载并格式化 19 个全网最强小说镜像源并动态注入自愈 ID
         resources_list = []
         gateway_url = str(request.base_url).rstrip("/")
         for res in EXTERNAL_RESOURCES:
@@ -368,12 +433,18 @@ async def get_resources(request: Request):
                 else:
                     formatted_url = raw_url.replace("{gateway_url}", gateway_url)
                 
-                formatted_url = formatted_url.replace("{raw_id}", raw_id).replace("{pref}", pref)
+                # 动态根据备用源站的种类，自适应拼入校正对齐后的真实物理 ID
+                if "69shuba" in res.get("sourceName", "") or "69" in res.get("sourceName", ""):
+                    formatted_url = formatted_url.replace("{raw_id}", aligned_69_raw_id).replace("{pref}", "0")
+                else:
+                    formatted_url = formatted_url.replace("{raw_id}", aligned_bq_raw_id).replace("{pref}", aligned_bq_pref)
+                
                 res_copy["chapterPageUrl"] = formatted_url
                 # 动态将镜像源里的最新章节和更新时间，无缝同步为本书最精确的真实数据！
                 res_copy["sourceLastChapter"] = latest_ch
                 res_copy["sourceLastChapterUpdate"] = latest_update
-            except Exception:
+            except Exception as format_err:
+                logger.warning(f"⚠️ 格式化外部源失败: {str(format_err)}")
                 pass
             resources_list.append(res_copy)
 

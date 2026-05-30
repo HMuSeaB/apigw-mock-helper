@@ -12,9 +12,54 @@ logger = logging.getLogger(__name__)
 
 def crawl_search(keyword: str) -> List[Dict[str, Any]]:
     """
-    新笔趣阁为备用镜像源，不提供主动搜索支持，直接返回空
+    实时去新笔趣阁（xbiquge.la）独立书库搜索书籍
     """
-    return []
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+        
+    session = get_secure_session()
+    search_url = "https://www.xbiquge.la/modules/article/search.php"
+    try:
+        encoded_keyword = keyword.encode('gbk')
+    except Exception:
+        encoded_keyword = keyword
+        
+    params = {"searchkey": encoded_keyword}
+    
+    books = []
+    try:
+        logger.info(f"🕸️ [xbiquge] 正在独立书库中检索: '{keyword}'")
+        response = session.post(search_url, data=params, timeout=8, verify=False)
+        response.encoding = 'gbk'
+        html = response.text
+        
+        final_url = str(response.url)
+        if "/modules/article/search.php" not in final_url:
+            match = re.search(r'https?://[^/]+/(\d+)/(\d+)/?$', final_url)
+            if match:
+                raw_id = f"{match.group(1)}_{match.group(2)}"
+                detail = crawl_info(f"bq_{raw_id}")
+                detail["categoryName"] = "新笔趣阁"
+                books.append(detail)
+                return books
+                
+        tr_tags = re.findall(r'<tr[^>]*>.*?<td class="odd"><a href="[^"]*/(\d+)/(\d+)/?">(.*?)</a></td>.*?<td class="even">(.*?)</td>', html, re.S)
+        for pref, num_id, name, author in tr_tags:
+            book_id = f"bq_{pref}_{num_id}"
+            books.append({
+                "book_id": book_id,
+                "book_name": name.strip(),
+                "book_author": author.strip(),
+                "book_pic": "https://api.mwm.moe/ycy",
+                "book_intro": "📂 新笔趣阁源站实时检索书籍。",
+                "book_lastchapter": "点击换源阅读",
+                "categoryName": "新笔趣阁"
+            })
+    except Exception as e:
+        logger.error(f"❌ [xbiquge] 独立书库检索异常: {str(e)}")
+        
+    return books
 
 
 def crawl_info(book_id: str) -> Dict[str, Any]:

@@ -12,9 +12,49 @@ logger = logging.getLogger(__name__)
 
 def crawl_search(keyword: str) -> List[Dict[str, Any]]:
     """
-    香书小说为备用镜像源，不提供主动搜索支持，直接返回空
+    实时去香书小说（ibiquges.org）独立书库搜索书籍
     """
-    return []
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+        
+    session = get_secure_session()
+    search_url = "https://www.ibiquges.org/modules/article/search.php"
+    params = {"searchkey": keyword}
+    
+    books = []
+    try:
+        logger.info(f"🕸️ [ibiquges] 正在独立书库中检索: '{keyword}'")
+        response = session.post(search_url, data=params, timeout=8, verify=False)
+        response.encoding = 'utf-8'
+        html = response.text
+        
+        final_url = str(response.url)
+        if "/modules/article/search.php" not in final_url:
+            match = re.search(r'https?://[^/]+/(\d+)/(\d+)/?$', final_url)
+            if match:
+                raw_id = f"{match.group(1)}_{match.group(2)}"
+                detail = crawl_info(f"xs_{raw_id}")
+                detail["categoryName"] = "香书小说"
+                books.append(detail)
+                return books
+                
+        tr_tags = re.findall(r'<tr[^>]*>.*?<td class="odd"><a href="[^"]*/(\d+)/(\d+)/?">(.*?)</a></td>.*?<td class="even">(.*?)</td>', html, re.S)
+        for pref, num_id, name, author in tr_tags:
+            book_id = f"xs_{pref}_{num_id}"
+            books.append({
+                "book_id": book_id,
+                "book_name": name.strip(),
+                "book_author": author.strip(),
+                "book_pic": "https://api.mwm.moe/ycy",
+                "book_intro": "📂 香书小说源站实时检索书籍。",
+                "book_lastchapter": "点击换源阅读",
+                "categoryName": "香书小说"
+            })
+    except Exception as e:
+        logger.error(f"❌ [ibiquges] 独立书库检索异常: {str(e)}")
+        
+    return books
 
 
 def crawl_info(book_id: str) -> Dict[str, Any]:
