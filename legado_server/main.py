@@ -456,8 +456,8 @@ async def get_resources(request: Request):
             res_copy = dict(res)
             try:
                 # 强行在内存中硬重写升级提取正则，彻底根治 1Panel/Docker 单文件挂载 inode 冲突导致 sources.json 同步失败的隐患！
-                res_copy["chapterUrl"] = {"rule": 'href\\s*=\\s*["\']((?!https?:)[^"\']*/\\d+\\.html?)["\']'}
-                res_copy["chapterName"] = {"rule": 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*/\\d+\\.html?["\']?[^>]*>([^<]+)</a>'}
+                res_copy["chapterUrl"] = {"rule": 'href\\s*=\\s*["\']((?!https?:)[^"\']*(?:/)?\\d+\\.html?)["\']'}
+                res_copy["chapterName"] = {"rule": 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*(?:/)?\\d+\\.html?["\']?[^>]*>([^<]+)</a>'}
 
                 # 动态填充 URL 中的所有占位符
                 raw_url = res.get("chapterPageUrl", "")
