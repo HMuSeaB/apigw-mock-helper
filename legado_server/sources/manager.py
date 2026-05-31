@@ -22,26 +22,46 @@ SOURCES_MAP = {
 
 def search_books(keyword: str) -> List[Dict[str, Any]]:
     """
-    全网实时并发搜索 API (去重合并版，相同书名作者只保留最优质的唯一记录)
+    全网实时多线程并发搜索 API (去重合并版，相同书名作者只保留最优质的唯一记录)
     """
     keyword = keyword.strip()
     if not keyword:
         return []
 
-    # 1. 实时并发检索 4 大独立小说书库站
-    books_bqg78 = bqg78.crawl_search(keyword)
-    books_69 = shuba69.crawl_search(keyword)
-    books_xs = ibiquges.crawl_search(keyword)
-    books_bq = xbiquge.crawl_search(keyword)
+    import concurrent.futures
 
-    # 2. 合并搜索结果
-    merged_books = books_xs + books_bq + books_69 + books_bqg78
+    # 1. 实时多线程并发检索 4 大独立小说书库站
+    funcs = [
+        ("bqg78", bqg78.crawl_search),
+        ("69shuba", shuba69.crawl_search),
+        ("ibiquges", ibiquges.crawl_search),
+        ("xbiquge", xbiquge.crawl_search),
+    ]
+
+    merged_books = []
+    # 使用 ThreadPoolExecutor 并发调度
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        # 提交所有的搜索任务
+        future_to_source = {executor.submit(func, keyword): name for name, func in funcs}
+        
+        # 收集执行结果 (带超时控制，防止某一个源超时拖慢全局)
+        try:
+            for future in concurrent.futures.as_completed(future_to_source, timeout=8.0):
+                source_name = future_to_source[future]
+                try:
+                    result = future.result()
+                    if result:
+                        merged_books.extend(result)
+                except Exception as exc:
+                    logger.error(f"❌ [manager] 源 {source_name} 并发搜索抛出异常: {exc}")
+        except concurrent.futures.TimeoutError:
+            logger.warning("⚠️ [manager] 部分并发搜索任务超时（已自动截断，保留已返回源的数据）")
 
     # 3. 智能去重合并：差不多名字和作者相同即可算为同一本书，只保留第一条最优质的检索记录
     seen = set()
     unique_books = []
     for book in merged_books:
-        # 统一擦除空格与大小写以进行最精确的去重
+        # 统一擦除空格与大小写以进行最精确 of 去重
         name_key = book.get("book_name", "").replace(" ", "").lower()
         author_key = book.get("book_author", "").replace(" ", "").lower()
         key = (name_key, author_key)

@@ -10,7 +10,7 @@ import logging
 import secrets
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, Header
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 from sources import manager as sources_manager
 from sources import bqg78
@@ -25,6 +25,9 @@ DB_FILE = os.path.join(os.path.dirname(__file__), "legado.db")
 
 # 全局多源 ID 智能自愈与对齐缓存字典 (书名 -> {源站: ID})
 ID_ALIGNMENT_CACHE = {}
+
+# 全局正文中转模式开关 (False 表示不走中转直接 302 重定向直连原站，True 表示走服务端中转中介清洗)
+PROXY_CONTENT_DELIVERY = True
 
 # ==================== 全局多源备用指引 (本地 sources.json 动态配置) ====================
 MULTISOURCE_INTRO = ""
@@ -477,7 +480,7 @@ async def get_resources(request: Request):
                 else:
                     formatted_url = formatted_url.replace("{raw_id}", aligned_bq_raw_id).replace("{pref}", aligned_bq_pref)
                 
-                # 动态把书名和作者通过 urllib.parse.quote 编码成 Query 参数，强行附在链接尾部，确保切源时网关能智能自愈！
+                # 动态把书名 and 作者通过 urllib.parse.quote 编码成 Query 参数，强行附在链接尾部，确保切源时网关能智能自愈！
                 import urllib.parse
                 encoded_name = urllib.parse.quote(book_name)
                 encoded_author = urllib.parse.quote(book_author)
@@ -525,10 +528,10 @@ async def get_resources(request: Request):
                     cleaned_path = "/" + cleaned_path
                 
                 if is_port_access:
-                    # 如果是带端口访问，应用户要求并且为了彻底消除代理导致的相对路径解析错误，章节 path 降级为真实的物理直连相对 URL！
+                    # 如果是带端口访问，为了彻底消除代理导致的相对路径解析错误，章节 path 降级为真实的物理直连相对 URL
                     ch_copy["path"] = cleaned_path
                 else:
-                    # 域名访问下也使用不带域名的相对中转链接，由客户端 JS 拼接网关域名，完美防止双重域名粘连！
+                    # 域名访问下也使用不带域名的相对中转链接，由客户端 JS 拼接网关地址，过 WAF 破盾秒开
                     ch_copy["path"] = f"/api.php/Book/getRealContent?url={cleaned_path}"
                 
                 final_chapters.append(ch_copy)
@@ -557,13 +560,33 @@ async def get_real_content(request: Request):
     四、 核心 API：实时拉取正文、广告智能净化清洗与云端透明中转网关 (兼容 GET 纯 HTML 输出)
     """
     try:
-        # A. 针对手机端直接 GET 请求章节正文代理 (透明中转免盾秒开轨)
+        url = ""
         if request.method == "GET":
             url = request.query_params.get("url", "").strip()
-            logger.info(f"🔔 [GET] 实时正文代理抓取净化: URL={url}")
-            if not url:
-                return HTMLResponse(content="未指定有效的正文链接参数", status_code=400)
+        else:
+            try:
+                body = await request.json()
+                url = body.get("url", "").strip()
+            except Exception:
+                pass
                 
+        if not url:
+            if request.method == "GET":
+                return HTMLResponse(content="未指定有效的正文链接参数", status_code=400)
+            return JSONResponse(content={"msg": "未指定正文链接参数", "code": -1})
+
+        # 物理还原域名
+        url = url.strip()
+        if "ddyueshu.com" in url and "/book/" in url:
+            url = url.replace("/book/", "/")
+
+        # 核心：如果不开启中转分发，直接 302 重定向直连原站，彻底不通过服务端中转！
+        if not PROXY_CONTENT_DELIVERY:
+            logger.info(f"🔄 [proxy] 已启用 302 不中转直连，重定向至原站正文: {url}")
+            return RedirectResponse(url=url, status_code=302)
+
+        # A. 针对手机端直接 GET 请求章节正文代理 (透明中转免盾秒开轨)
+        if request.method == "GET":
             # 调度云端爬虫爬取并智能净化
             clean_text = sources_manager.get_content(url)
             
@@ -583,13 +606,7 @@ async def get_real_content(request: Request):
             return HTMLResponse(content=html_template, status_code=200)
             
         # B. 针对自建接口常规 POST 的 JSON 数据分发轨
-        body = await request.json()
-        url = body.get("url", "").strip()
-        logger.info(f"🔔 [POST] 实时抓取正文、净化与AES加密: URL={url}")
-        
-        if not url:
-            return JSONResponse(content={"msg": "未指定正文链接参数", "code": -1})
-            
+        # 此时肯定已经提取到了 url，直接使用中转拉取
         clean_text = sources_manager.get_content(url)
         encrypted_text = aes_encrypt_base64(clean_text)
         
@@ -829,7 +846,7 @@ async def get_sheet(request: Request, uid: str = Header(None), token: str = Head
         return JSONResponse(content={"msg": f"服务端异常: {str(e)}", "code": -1})
 
 
-def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
+def find_aligned_id(source_domain: str, book_name: str, raw_path: str = "") -> Dict[str, str]:
     """
     通用嗅探搜寻算法：针对未对齐的备用小说域名进行精确 ID 对齐 (支持多重搜索路径、GBK/UTF-8自动编码及 302 重定向自愈)
     """
@@ -840,12 +857,23 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
     book_name = book_name.strip()
     source_domain = source_domain.strip().lower()
     
-    # 默认兜底保护值
-    default_res = {"raw_id": "673", "pref": "0"}
+    # 解析自适应主源原生 ID 作为备用兜底值，不使用硬编码的 673，防止错配！
+    fallback_raw_id = "673"
+    fallback_pref = "0"
+    if raw_path:
+        numbers = re.findall(r'\d+', raw_path)
+        if len(numbers) >= 2:
+            fallback_raw_id = numbers[-1]
+            fallback_pref = numbers[-2]
+        elif len(numbers) == 1:
+            fallback_raw_id = numbers[0]
+            fallback_pref = "0"
+    default_res = {"raw_id": fallback_raw_id, "pref": fallback_pref}
+    
     if not book_name:
         return default_res
         
-    logger.info(f"🔄 [align] 开始为备用域名 '{source_domain}' 进行智能嗅探对齐 ID: 《{book_name}》")
+    logger.info(f"🔄 [align] 开始为备用域名 '{source_domain}' 进行智能嗅探对齐 ID: 《{book_name}》 (自适应兜底: {default_res})")
     
     # 1. 尝试从 SQLite 中读取持久化缓存
     try:
@@ -971,7 +999,15 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
             search_url = f"https://{source_domain}{path}?{param_name}={quoted_keyword}"
             logger.info(f"🕸️ [align] 尝试通用嗅探搜索: {search_url} (编码: {encoding})")
             
-            response = session.get(search_url, timeout=6, allow_redirects=True)
+            # 注入高级伪装请求头以成功绕过 43看书网等站点的 WAF 403 阻断防护
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": f"https://{source_domain}/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+            }
+            
+            response = session.get(search_url, headers=headers, timeout=6, allow_redirects=True)
             
             if response.status_code == 200:
                 # 检查是否直接 302 到了小说详情页
@@ -1036,7 +1072,7 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
         except Exception as ex:
             logger.warning(f"⚠️ [align] 尝试嗅探路径 {path} 发生异常: {str(ex)[:100]}")
             
-    logger.warning(f"⚠️ [align] 通用嗅探无法搜寻到 {source_domain} 上《{book_name}》的真实 ID，启动兜底保护值。")
+    logger.warning(f"⚠️ [align] 通用嗅探无法搜寻到 {source_domain} 上《{book_name}》的真实 ID，启动自适应主源原生兜底防护。")
     return default_res
 
 
@@ -1062,7 +1098,7 @@ async def unified_proxy(source_domain: str, path: str, request: Request):
     
     # A. 开启多源 ID 实时自愈拦截
     if real_book_name:
-        aligned = find_aligned_id(source_domain, real_book_name)
+        aligned = find_aligned_id(source_domain, real_book_name, path)
         aligned_raw_id = aligned["raw_id"]
         aligned_pref = aligned["pref"]
         
