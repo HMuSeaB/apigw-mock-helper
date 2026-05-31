@@ -104,6 +104,11 @@ def get_content(url: str) -> str:
     if not url:
         return "未指定正文链接参数"
 
+    # 物理擦除由于欺骗客户端脆弱正则而强行塞入的虚构 `/book/` 前缀，还原为原站真实的物理路径
+    if "ddyueshu.com" in url and "/book/" in url:
+        url = url.replace("/book/", "/")
+        logger.info(f"🛡️ [manager] 已自愈还原顶点改版物理链接: {url}")
+
     # A. 针对 69书吧的正文并净化
     if "69shuba" in url:
         try:

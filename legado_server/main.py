@@ -80,6 +80,17 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
             """)
+            # 多源对齐 ID 持久化表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS aligned_ids (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_name TEXT NOT NULL,
+                    source_domain TEXT NOT NULL,
+                    raw_id TEXT NOT NULL,
+                    pref TEXT NOT NULL,
+                    UNIQUE(book_name, source_domain)
+                )
+            """)
             # 升级已有表字段 (添加对齐ID)
             try:
                 cursor.execute("ALTER TABLE sheets ADD COLUMN aligned_bq_id TEXT")
@@ -270,16 +281,8 @@ async def get_book_info(request: Request):
             latest_ch = "开始阅读"
             latest_update = "实时同步中"
 
-        # 将 18 个镜像站的配置指引动态格式化并追加到简介尾部，展现真实小说的最新状态！
-        try:
-            formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch, latest_update=latest_update)
-        except Exception:
-            try:
-                formatted_intro = MULTISOURCE_INTRO.format(latest_ch=latest_ch)
-            except Exception:
-                formatted_intro = MULTISOURCE_INTRO
-        
-        book_intro += formatted_intro
+        # 简介去重净化重构：移除向简介追加 formatted_intro 的冗余逻辑，仅返回纯净的原站简介，交由客户端 JS 渲染唯一换源说明
+        pass
         
         # 计算不带端口号的安全物理直连目录链接，作为手机端最后的 fallback 安全气囊，彻底消除闪退可能！
         raw_id = "673"
@@ -473,6 +476,15 @@ async def get_resources(request: Request):
                 else:
                     formatted_url = formatted_url.replace("{raw_id}", aligned_bq_raw_id).replace("{pref}", aligned_bq_pref)
                 
+                # 动态把书名和作者通过 urllib.parse.quote 编码成 Query 参数，强行附在链接尾部，确保切源时网关能智能自愈！
+                import urllib.parse
+                encoded_name = urllib.parse.quote(book_name)
+                encoded_author = urllib.parse.quote(book_author)
+                if "?" in formatted_url:
+                    formatted_url += f"&real_book_name={encoded_name}&real_book_author={encoded_author}"
+                else:
+                    formatted_url += f"?real_book_name={encoded_name}&real_book_author={encoded_author}"
+
                 res_copy["chapterPageUrl"] = formatted_url
                 # 动态将镜像源里的最新章节和更新时间，无缝同步为本书最精确的真实数据！
                 res_copy["sourceLastChapter"] = latest_ch
@@ -816,24 +828,213 @@ async def get_sheet(request: Request, uid: str = Header(None), token: str = Head
         return JSONResponse(content={"msg": f"服务端异常: {str(e)}", "code": -1})
 
 
+def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
+    """
+    通用嗅探搜寻算法：针对未对齐的备用小说域名进行精确 ID 对齐 (支持多重搜索路径、GBK/UTF-8自动编码及 302 重定向自愈)
+    """
+    import urllib.parse
+    import re
+    from sources.utils import get_secure_session
+    
+    book_name = book_name.strip()
+    source_domain = source_domain.strip().lower()
+    
+    # 默认兜底保护值
+    default_res = {"raw_id": "673", "pref": "0"}
+    if not book_name:
+        return default_res
+        
+    logger.info(f"🔄 [align] 开始为备用域名 '{source_domain}' 进行智能嗅探对齐 ID: 《{book_name}》")
+    
+    # 1. 尝试从 SQLite 中读取持久化缓存
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT raw_id, pref FROM aligned_ids WHERE book_name = ? AND source_domain = ?", (book_name, source_domain))
+            row = cursor.fetchone()
+            if row:
+                logger.info(f"🎯 [align] SQLite 缓存命中 ({source_domain}): raw_id='{row[0]}', pref='{row[1]}'")
+                return {"raw_id": row[0], "pref": row[1]}
+    except Exception as e:
+        logger.error(f"⚠️ [align] 读取 aligned_ids 缓存异常: {str(e)}")
+        
+    # 2. 从 sources.json 获取该域名对应的 chapterPageUrl 正则匹配模板
+    id_regex = r'/book/(?P<raw_id>\d+)/' # 默认
+    chapter_page_url_tpl = ""
+    for res in EXTERNAL_RESOURCES:
+        if res.get("sourceName", "").lower() == source_domain or source_domain in res.get("sourceName", "").lower():
+            chapter_page_url_tpl = res.get("chapterPageUrl", "")
+            break
+            
+    if chapter_page_url_tpl:
+        # 将 chapterPageUrl 转换为用于提取 ID 的正则表达式
+        # 比如 `{gateway_url}/proxy/www.43kanshu.com/book/{raw_id}/` -> `book/(?P<raw_id>\d+)/`
+        path_part = chapter_page_url_tpl
+        if "/proxy/" in path_part:
+            path_part = path_part.split("/proxy/")[1]
+            path_part = "/".join(path_part.split("/")[1:]) # 去掉域名部分，保留相对路径部分
+        
+        # 将 {raw_id} 和 {pref} 转换为正则捕获组
+        regex_str = re.escape(path_part)
+        regex_str = regex_str.replace(r'\{raw_id\}', r'(?P<raw_id>\d+)').replace(r'\{pref\}', r'(?P<pref>\d+)')
+        # 兼容可能有斜杠或无斜杠
+        regex_str = regex_str.replace(r'\/', r'*(?:/)?')
+        id_regex = regex_str
+        logger.info(f"🔍 [align] 根据配置模板自适应编译出 ID 提取正则表达式: '{id_regex}'")
+
+    session = get_secure_session()
+    # 禁用系统代理防 CF IP 阻断 400
+    session.trust_env = False
+    session.proxies = {"http": None, "https": None}
+    
+    # 杰奇/笔趣阁系统经典搜索路由和参数类型列表
+    search_paths = [
+        # (搜索路径, 参数名, 是否强转 GBK)
+        ("/search.php", "searchkey", True),
+        ("/search.php", "keyword", True),
+        ("/search.php", "searchkey", False),
+        ("/search.php", "keyword", False),
+        ("/s.php", "q", False),
+        ("/s", "q", False),
+        ("/search.html", "searchkey", True),
+    ]
+    
+    for path, param_name, force_gbk in search_paths:
+        try:
+            encoding = "gbk" if force_gbk else "utf-8"
+            try:
+                quoted_keyword = urllib.parse.quote(book_name, encoding=encoding)
+            except Exception:
+                continue
+                
+            search_url = f"https://{source_domain}{path}?{param_name}={quoted_keyword}"
+            logger.info(f"🕸️ [align] 尝试通用嗅探搜索: {search_url} (编码: {encoding})")
+            
+            response = session.get(search_url, timeout=6, allow_redirects=True)
+            
+            if response.status_code == 200:
+                # 检查是否直接 302 到了小说详情页
+                final_url = str(response.url)
+                logger.info(f"🕸️ [align] 搜索请求最终响应 URL: {final_url}")
+                
+                match = re.search(id_regex, final_url)
+                if match:
+                    groups = match.groupdict()
+                    raw_id = groups.get("raw_id", "")
+                    pref = groups.get("pref", "0")
+                    if raw_id:
+                        logger.info(f"🎯 [align] 通过 302 重定向成功精准对齐 ID! raw_id='{raw_id}', pref='{pref}'")
+                        # 写入 SQLite
+                        try:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
+                                    (book_name, source_domain, raw_id, pref)
+                                )
+                                conn.commit()
+                        except Exception as db_err:
+                            logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
+                        return {"raw_id": raw_id, "pref": pref}
+                
+                # 如果没有重定向，而是在页面中返回了列表超链接，自动匹配
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "gbk" in content_type or "gb2312" in content_type:
+                    response.encoding = "gbk"
+                else:
+                    response.encoding = "utf-8"
+                
+                html = response.text
+                # 匹配所有常规 <a> 超链接
+                links = re.findall(r'href=["\']([^"\']+)["\'][^>]*>([^<]*)</a>', html, re.I)
+                for href, text in links:
+                    text_clean = text.strip().replace(" ", "").lower()
+                    book_name_clean = book_name.replace(" ", "").lower()
+                    if book_name_clean in text_clean or text_clean in book_name_clean:
+                        match = re.search(id_regex, href)
+                        if match:
+                            groups = match.groupdict()
+                            raw_id = groups.get("raw_id", "")
+                            pref = groups.get("pref", "0")
+                            if raw_id:
+                                logger.info(f"🎯 [align] 通过列表 HTML 超链接分析成功对齐 ID! href='{href}', raw_id='{raw_id}', pref='{pref}'")
+                                # 写入 SQLite
+                                try:
+                                    with sqlite3.connect(DB_FILE) as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute(
+                                            "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
+                                            (book_name, source_domain, raw_id, pref)
+                                        )
+                                        conn.commit()
+                                except Exception as db_err:
+                                    logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
+                                return {"raw_id": raw_id, "pref": pref}
+            else:
+                logger.warning(f"⚠️ [align] 搜索响应状态码不正确: {response.status_code}")
+        except Exception as ex:
+            logger.warning(f"⚠️ [align] 尝试嗅探路径 {path} 发生异常: {str(ex)[:100]}")
+            
+    logger.warning(f"⚠️ [align] 通用嗅探无法搜寻到 {source_domain} 上《{book_name}》的真实 ID，启动兜底保护值。")
+    return default_res
+
+
 @app.get("/proxy/{source_domain}/{path:path}")
 async def unified_proxy(source_domain: str, path: str, request: Request):
     """
-    十、 核心 API：通用云端代理与防爬盾拦截重写网关
-    通过云端 Pro 级 Session 在服务器端 100% 破解 JS 盾与 WAF 防御，并执行 HTML 绝对链接重写，消除客户端域名拼接 Bug。
+    十、 核心 API：通用云端代理、防爬盾拦截重写网关与“服务端自解析纯净化”重构 (全新免网关接口版本)
+    通过云端 Pro 级 Session 在服务器端 100% 破解 JS 盾与 WAF 防御，并在服务端自己把网页目录解析完毕，
+    重写拼接成指向我们原生 getRealContent 正文接口的纯相对根超链接（格式为 href="/api.php/Book/getRealContent?url=真实绝对URL"），
+    在客户端 JS 拼接时 100% 完美规避斜杠与双重 http 粘连漏洞，达到极致稳定性。
     """
     import re
     import urllib.parse
-    query_params = dict(request.query_params)
-    query_str = urllib.parse.urlencode(query_params) if query_params else ""
+    from urllib.parse import urljoin
     
-    target_url = f"https://{source_domain}/{path}"
+    query_params = dict(request.query_params)
+    real_book_name = query_params.get("real_book_name", "").strip()
+    real_book_author = query_params.get("real_book_author", "").strip()
+    
+    # 剥离自建 Query 参数，防止原站解析错误
+    filtered_params = {k: v for k, v in query_params.items() if k not in ["real_book_name", "real_book_author"]}
+    query_str = urllib.parse.urlencode(filtered_params) if filtered_params else ""
+    
+    # A. 开启多源 ID 实时自愈拦截
+    if real_book_name:
+        aligned = find_aligned_id(source_domain, real_book_name)
+        aligned_raw_id = aligned["raw_id"]
+        aligned_pref = aligned["pref"]
+        
+        logger.info(f"🔄 [proxy] 正在对请求 path 执行 ID 替换自愈: 原始 path='{path}', 正确对齐 ID='{aligned_raw_id}'(pref={aligned_pref})")
+        
+        # 识别并强行自愈替换 path 里的数字 ID
+        if "_" in path:
+            path = re.sub(r'\d+_\d+', f"{aligned_pref}_{aligned_raw_id}", path)
+        else:
+            numbers = re.findall(r'\d+', path)
+            if len(numbers) >= 2:
+                path = path.replace(numbers[-1], aligned_raw_id).replace(numbers[-2], aligned_pref)
+            elif len(numbers) == 1:
+                path = path.replace(numbers[0], aligned_raw_id)
+                
+        logger.info(f"🎯 [proxy] 自愈替换完成: 自愈后 path='{path}'")
+
+    # 构建原站真实目录绝对 URL (物理擦除 /book/ 顶点前缀)
+    raw_path = path
+    if "ddyueshu.com" in source_domain and raw_path.startswith("book/"):
+        raw_path = raw_path.replace("book/", "")
+        
+    target_url = f"https://{source_domain}/{raw_path}"
     if query_str:
         target_url += f"?{query_str}"
         
-    logger.info(f"🕸️ [proxy] 代理拦截并破盾抓取: {target_url}")
+    logger.info(f"🕸️ [proxy] 代理拦截并破盾自愈抓取: {target_url}")
     
     session = sources_manager.get_secure_session()
+    # 禁用系统代理防 CF IP 阻断 400
+    session.trust_env = False
+    session.proxies = {"http": None, "https": None}
+    
     try:
         response = session.get(target_url, timeout=10, verify=False)
         
@@ -849,9 +1050,89 @@ async def unified_proxy(source_domain: str, path: str, request: Request):
         final_domain_match = re.search(r'https?://([^/]+)', final_url)
         final_domain = final_domain_match.group(1) if final_domain_match else source_domain
         
-        # 如果是目录页面，自动执行 Response Rewriting 重写，重定向域名绝对链接消除拼接 Bug！
+        # B. 服务端自解析纯净化：如果不是以 html 结尾的章节页，则认定为目录页！
         if not path.endswith((".html", ".htm")):
-            logger.info(f"📝 [proxy] 检测到目录页响应，启动绝对 URL 智能重写，重定向域名: {final_domain}")
+            logger.info(f"📝 [proxy] 检测到目录页响应，启动“服务端自解析纯净化”解析重构流程")
+            
+            # 1. 动态加载该源在 sources.json 中的提取规则
+            chapter_beat_regex = ""
+            chapter_url_regex = 'href\\s*=\\s*["\']((?!https?:)[^"\']*(?:/)?\\d+\\.html?)["\']' # 默认
+            chapter_name_regex = 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*(?:/)?\\d+\\.html?["\']?[^>]*>([^<]+)</a>' # 默认
+            
+            for res in EXTERNAL_RESOURCES:
+                if res.get("sourceName", "").lower() == source_domain or source_domain in res.get("sourceName", "").lower():
+                    chapter_beat_regex = res.get("chapterPageBeat", {}).get("rule", "")
+                    chapter_url_regex = res.get("chapterUrl", {}).get("rule", chapter_url_regex)
+                    chapter_name_regex = res.get("chapterName", {}).get("rule", chapter_name_regex)
+                    break
+            
+            # 2. 截取目录模块块
+            cont = html
+            if chapter_beat_regex:
+                try:
+                    beat_match = re.search(chapter_beat_regex, html, re.I | re.S)
+                    if beat_match:
+                        cont = beat_match.group(1)
+                except Exception as e:
+                    logger.warning(f"⚠️ [proxy] chapterPageBeat 过滤块正则运行失败: {e}")
+            
+            cont_normalized = re.sub(r'\s+', ' ', cont)
+            
+            # 3. 在服务端精准提取章节链接与章节标题
+            raw_urls = re.findall(chapter_url_regex, cont_normalized)
+            raw_names = re.findall(chapter_name_regex, cont_normalized)
+            
+            logger.info(f"🔍 [proxy] 服务端自解析结果: 匹配到超链接={len(raw_urls)} 个, 标题={len(raw_names)} 个")
+            
+            extracted_chapters = []
+            min_len = min(len(raw_urls), len(raw_names))
+            
+            for i in range(min_len):
+                ch_url = raw_urls[i]
+                ch_name = raw_names[i]
+                ch_name_clean = re.sub(r'<.*?>', '', ch_name).strip()
+                
+                if isinstance(ch_url, tuple):
+                    ch_url = ch_url[0]
+                if isinstance(ch_name_clean, tuple):
+                    ch_name_clean = ch_name_clean[0]
+                    
+                ch_url = ch_url.strip()
+                ch_name_clean = ch_name_clean.strip()
+                
+                # 计算绝对链接
+                real_abs_chapter_url = urljoin(target_url, ch_url)
+                extracted_chapters.append((ch_name_clean, real_abs_chapter_url))
+                
+            # 4. 如果匹配出了目录，我们亲自为书源生成免网关的直连根相对链接 HTML
+            if extracted_chapters:
+                logger.info(f"📝 [proxy] 服务端自解析成功！正在为书源生成免网关的直连根相对链接 HTML (总计 {len(extracted_chapters)} 章)")
+                html_lines = [
+                    "<!DOCTYPE html>",
+                    "<html>",
+                    "<head>",
+                    '    <meta charset="utf-8">',
+                    "    <title>Clean TOC</title>",
+                    "</head>",
+                    "<body>"
+                ]
+                
+                # 拼接成核心正文接口的根路径形式，携带对齐后的真实绝对章节 URL！
+                for ch_name, real_url in extracted_chapters:
+                    html_lines.append(f'    <a href="/api.php/Book/getRealContent?url={urllib.parse.quote(real_url)}">{ch_name}</a><br/>')
+                    
+                html_lines.extend([
+                    "</body>",
+                    "</html>"
+                ])
+                
+                pure_html = "\n".join(html_lines)
+                return HTMLResponse(content=pure_html, status_code=200)
+            else:
+                logger.warning("⚠️ [proxy] 服务端自解析目录未匹配到任何有效章节，自动降级为原生 HTML 重写逻辑")
+                
+            # C. 降级安全气囊：如果自解析失败，自动执行 Response Rewriting 兜底
+            logger.info(f"📝 [proxy] 启动绝对 URL 智能重写，重定向域名: {final_domain}")
             gateway_base = f"/proxy/{final_domain}/"
             
             # 替换带域名的绝对链接
