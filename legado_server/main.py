@@ -363,6 +363,7 @@ async def get_resources(request: Request):
             
         # 开启国防级全局双向 ID 智能自愈与对齐系统 (支持数据库物理级别自愈 + 内存缓存加速)
         book_name = book_detail.get("book_name", "").strip()
+        book_author = book_detail.get("book_author", "").strip()
         aligned_bq_raw_id = raw_id
         aligned_bq_pref = pref
         aligned_69_raw_id = raw_id
@@ -462,7 +463,7 @@ async def get_resources(request: Request):
                 res_copy["chapterUrl"] = {"rule": 'href\\s*=\\s*["\']((?!https?:)[^"\']*(?:/)?\\d+\\.html?)["\']'}
                 res_copy["chapterName"] = {"rule": 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*(?:/)?\\d+\\.html?["\']?[^>]*>([^<]+)</a>'}
 
-                # 动态填充 URL 中的所有占位符
+                # 动态填充 URL 中的所有占位符，补齐绝对主机与协议以防止客户端正则 match null 闪退！
                 raw_url = res.get("chapterPageUrl", "")
                 if is_port_access:
                     # 如果是带端口访问，为了彻底防止手机端正则闪退，将代理链接恢复为真实的没有端口号的物理直连链接
@@ -858,7 +859,66 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
     except Exception as e:
         logger.error(f"⚠️ [align] 读取 aligned_ids 缓存异常: {str(e)}")
         
-    # 2. 从 sources.json 获取该域名对应的 chapterPageUrl 正则匹配模板
+    # 2. 强力直派自愈拦截分支：
+    # A. 针对香书小说精准派发
+    if "ibiquges" in source_domain:
+        try:
+            logger.info(f"🔄 [align] [direct] 正在为香书小说 '{source_domain}' 调度独立子模块检索对齐 ID: '{book_name}'")
+            from sources import ibiquges
+            search_results = ibiquges.crawl_search(book_name)
+            for b in search_results:
+                if b.get("book_name", "").strip() == book_name:
+                    b_id = b.get("book_id", "")
+                    if b_id.startswith("xs_"):
+                        parts = b_id.replace("xs_", "").split("_")
+                        if len(parts) == 2:
+                            raw_id = parts[1]
+                            pref = parts[0]
+                            logger.info(f"🎯 [align] [direct] 香书小说独立子模块对齐成功: raw_id='{raw_id}', pref='{pref}'")
+                            # 写入 SQLite 缓存
+                            try:
+                                with sqlite3.connect(DB_FILE) as conn:
+                                    cursor = conn.cursor()
+                                    cursor.execute(
+                                        "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
+                                        (book_name, source_domain, raw_id, pref)
+                                    )
+                                    conn.commit()
+                            except Exception as db_err:
+                                logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
+                            return {"raw_id": raw_id, "pref": pref}
+        except Exception as align_err:
+            logger.warning(f"⚠️ [align] [direct] 调度香书小说对齐发生异常: {str(align_err)}")
+
+    # B. 针对 69书吧精准派发
+    elif "69shuba" in source_domain:
+        try:
+            logger.info(f"🔄 [align] [direct] 正在为 69书吧 '{source_domain}' 调度独立子模块检索对齐 ID: '{book_name}'")
+            from sources import shuba69
+            search_results = shuba69.crawl_search(book_name)
+            for b in search_results:
+                if b.get("book_name", "").strip() == book_name:
+                    b_id = b.get("book_id", "")
+                    if b_id.startswith("69_"):
+                        raw_id = b_id.replace("69_", "")
+                        pref = "0"
+                        logger.info(f"🎯 [align] [direct] 69书吧独立子模块对齐成功: raw_id='{raw_id}', pref='{pref}'")
+                        # 写入 SQLite 缓存
+                        try:
+                            with sqlite3.connect(DB_FILE) as conn:
+                                cursor = conn.cursor()
+                                cursor.execute(
+                                    "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
+                                    (book_name, source_domain, raw_id, pref)
+                                )
+                                conn.commit()
+                        except Exception as db_err:
+                            logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
+                        return {"raw_id": raw_id, "pref": pref}
+        except Exception as align_err:
+            logger.warning(f"⚠️ [align] [direct] 调度 69书吧对齐发生异常: {str(align_err)}")
+
+    # 3. 从 sources.json 获取该域名对应的 chapterPageUrl 正则匹配模板
     id_regex = r'/book/(?P<raw_id>\d+)/' # 默认
     chapter_page_url_tpl = ""
     for res in EXTERNAL_RESOURCES:
@@ -890,6 +950,7 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
     # 杰奇/笔趣阁系统经典搜索路由和参数类型列表
     search_paths = [
         # (搜索路径, 参数名, 是否强转 GBK)
+        ("/modules/article/search.php", "searchkey", True),
         ("/search.php", "searchkey", True),
         ("/search.php", "keyword", True),
         ("/search.php", "searchkey", False),
@@ -983,9 +1044,9 @@ def find_aligned_id(source_domain: str, book_name: str) -> Dict[str, str]:
 async def unified_proxy(source_domain: str, path: str, request: Request):
     """
     十、 核心 API：通用云端代理、防爬盾拦截重写网关与“服务端自解析纯净化”重构 (全新免网关接口版本)
-    通过云端 Pro 级 Session 在服务器端 100% 破解 JS 盾与 WAF 防御，并在服务端自己把网页目录解析完毕，
-    重写拼接成指向我们原生 getRealContent 正文接口的纯相对根超链接（格式为 href="/api.php/Book/getRealContent?url=真实绝对URL"），
-    在客户端 JS 拼接时 100% 完美规避斜杠与双重 http 粘连漏洞，达到极致稳定性。
+    通过云端 Pro 级 Session 在服务器端 100% 破解 JS 盾与 WAF 防御，并服务端自获取网页真实目录的 div 块，
+    在服务端精准将所有符合章节超链接规则的相对 href 重写替换为指向我们原生 getRealContent 正文接口的相对根超链接（格式为 href="/api.php/Book/getRealContent?url=真实绝对URL"），
+    并把处理后但保留了原网页完美 div 结构和排版的 HTML 吐给客户端，从根本上兼顾了“原网页匹配”与“直连接口绝对稳定”的超级闭环。
     """
     import re
     import urllib.parse
@@ -1050,86 +1111,68 @@ async def unified_proxy(source_domain: str, path: str, request: Request):
         final_domain_match = re.search(r'https?://([^/]+)', final_url)
         final_domain = final_domain_match.group(1) if final_domain_match else source_domain
         
-        # B. 服务端自解析纯净化：如果不是以 html 结尾的章节页，则认定为目录页！
+        # B. 服务端自解析高保真重写：如果不是以 html 结尾的章节页，则认定为目录页！
         if not path.endswith((".html", ".htm")):
-            logger.info(f"📝 [proxy] 检测到目录页响应，启动“服务端自解析纯净化”解析重构流程")
+            logger.info(f"📝 [proxy] 检测到目录页响应，启动“服务端自解析真实 div + href 原位替换”重构流程")
             
             # 1. 动态加载该源在 sources.json 中的提取规则
             chapter_beat_regex = ""
             chapter_url_regex = 'href\\s*=\\s*["\']((?!https?:)[^"\']*(?:/)?\\d+\\.html?)["\']' # 默认
-            chapter_name_regex = 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*(?:/)?\\d+\\.html?["\']?[^>]*>([^<]+)</a>' # 默认
             
             for res in EXTERNAL_RESOURCES:
                 if res.get("sourceName", "").lower() == source_domain or source_domain in res.get("sourceName", "").lower():
                     chapter_beat_regex = res.get("chapterPageBeat", {}).get("rule", "")
                     chapter_url_regex = res.get("chapterUrl", {}).get("rule", chapter_url_regex)
-                    chapter_name_regex = res.get("chapterName", {}).get("rule", chapter_name_regex)
                     break
             
-            # 2. 截取目录模块块
+            # 2. 精准获取网页真实的目录 div 块
             cont = html
             if chapter_beat_regex:
                 try:
                     beat_match = re.search(chapter_beat_regex, html, re.I | re.S)
                     if beat_match:
+                        # 仅保留包含章节超链接的真实目录 div 部分，实现原汁原味的排版和过滤
                         cont = beat_match.group(1)
                 except Exception as e:
                     logger.warning(f"⚠️ [proxy] chapterPageBeat 过滤块正则运行失败: {e}")
             
-            cont_normalized = re.sub(r'\s+', ' ', cont)
+            # 3. 在服务端对真实 div 中的章节相对超链接执行 href 高保真精准原位替换
+            # 定义超链接 href 精准替换函数，排除绝对外链，仅替换符合章节正则的相对链接
+            def replace_href(match):
+                raw_href = match.group(1).strip()
+                if raw_href.startswith(("http://", "https://", "javascript:", "#")):
+                    return match.group(0)
+                
+                # 重新包装为 href="xxx" 格式以完美契合 chapter_url_regex 对完整属性标签的匹配校验
+                test_str = f'href="{raw_href}"'
+                if re.search(chapter_url_regex, test_str):
+                    real_abs_url = urljoin(target_url, raw_href)
+                    encoded_url = urllib.parse.quote(real_abs_url)
+                    # 替换为以斜杠开头、免代理中转直接指向核心正文接口的根相对路径格式！
+                    return f'href="/api.php/Book/getRealContent?url={encoded_url}"'
+                
+                return match.group(0)
             
-            # 3. 在服务端精准提取章节链接与章节标题
-            raw_urls = re.findall(chapter_url_regex, cont_normalized)
-            raw_names = re.findall(chapter_name_regex, cont_normalized)
-            
-            logger.info(f"🔍 [proxy] 服务端自解析结果: 匹配到超链接={len(raw_urls)} 个, 标题={len(raw_names)} 个")
-            
-            extracted_chapters = []
-            min_len = min(len(raw_urls), len(raw_names))
-            
-            for i in range(min_len):
-                ch_url = raw_urls[i]
-                ch_name = raw_names[i]
-                ch_name_clean = re.sub(r'<.*?>', '', ch_name).strip()
+            # 执行高保真精准超链接原位替换
+            try:
+                # 匹配所有超链接中的 href 属性进行原位替换
+                rewritten_div = re.sub(r'href\s*=\s*["\']([^"\']+)["\']', replace_href, cont)
                 
-                if isinstance(ch_url, tuple):
-                    ch_url = ch_url[0]
-                if isinstance(ch_name_clean, tuple):
-                    ch_name_clean = ch_name_clean[0]
-                    
-                ch_url = ch_url.strip()
-                ch_name_clean = ch_name_clean.strip()
-                
-                # 计算绝对链接
-                real_abs_chapter_url = urljoin(target_url, ch_url)
-                extracted_chapters.append((ch_name_clean, real_abs_chapter_url))
-                
-            # 4. 如果匹配出了目录，我们亲自为书源生成免网关的直连根相对链接 HTML
-            if extracted_chapters:
-                logger.info(f"📝 [proxy] 服务端自解析成功！正在为书源生成免网关的直连根相对链接 HTML (总计 {len(extracted_chapters)} 章)")
-                html_lines = [
-                    "<!DOCTYPE html>",
-                    "<html>",
-                    "<head>",
-                    '    <meta charset="utf-8">',
-                    "    <title>Clean TOC</title>",
-                    "</head>",
-                    "<body>"
-                ]
-                
-                # 拼接成核心正文接口的根路径形式，携带对齐后的真实绝对章节 URL！
-                for ch_name, real_url in extracted_chapters:
-                    html_lines.append(f'    <a href="/api.php/Book/getRealContent?url={urllib.parse.quote(real_url)}">{ch_name}</a><br/>')
-                    
-                html_lines.extend([
-                    "</body>",
-                    "</html>"
-                ])
-                
-                pure_html = "\n".join(html_lines)
-                return HTMLResponse(content=pure_html, status_code=200)
-            else:
-                logger.warning("⚠️ [proxy] 服务端自解析目录未匹配到任何有效章节，自动降级为原生 HTML 重写逻辑")
+                # 返回保留了原站排版与 div、且重写了 href 章节超链接的 HTML 页面
+                final_toc_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>TOC - Aligned</title>
+</head>
+<body>
+    {rewritten_div}
+</body>
+</html>"""
+                logger.info("✅ 真实目录 div 章节超链接高保真 href 替换完成！成功交付！")
+                return HTMLResponse(content=final_toc_html, status_code=200)
+            except Exception as parse_err:
+                logger.error(f"❌ 真实目录 div 章节重写替换失败: {parse_err}，自动降级为安全气囊逻辑")
                 
             # C. 降级安全气囊：如果自解析失败，自动执行 Response Rewriting 兜底
             logger.info(f"📝 [proxy] 启动绝对 URL 智能重写，重定向域名: {final_domain}")
