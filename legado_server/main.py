@@ -466,13 +466,9 @@ async def get_resources(request: Request):
                 res_copy["chapterUrl"] = {"rule": 'href\\s*=\\s*["\']((?!https?:)[^"\']*(?:/)?\\d+\\.html?)["\']'}
                 res_copy["chapterName"] = {"rule": 'href\\s*=\\s*["\']?(?!https?:)[^"\'\\s>]*(?:/)?\\d+\\.html?["\']?[^>]*>([^<]+)</a>'}
 
-                # 动态填充 URL 中的所有占位符，补齐绝对主机与协议以防止客户端正则 match null 闪退！
+                # 统一使用去代理化的 100% 绝对物理直连地址，让阅读 App 本身的高强过盾能力直接解析
                 raw_url = res.get("chapterPageUrl", "")
-                if is_port_access:
-                    # 如果是带端口访问，为了彻底防止手机端正则闪退，将代理链接恢复为真实的没有端口号的物理直连链接
-                    formatted_url = raw_url.replace("{gateway_url}/proxy/", "https://")
-                else:
-                    formatted_url = raw_url.replace("{gateway_url}", gateway_url)
+                formatted_url = raw_url
                 
                 # 动态根据备用源站的种类，自适应拼入校正对齐后的真实物理 ID
                 if "69shuba" in res.get("sourceName", "") or "69" in res.get("sourceName", ""):
@@ -527,12 +523,8 @@ async def get_resources(request: Request):
                 if not cleaned_path.startswith("/"):
                     cleaned_path = "/" + cleaned_path
                 
-                if is_port_access:
-                    # 如果是带端口访问，为了彻底消除代理导致的相对路径解析错误，章节 path 降级为真实的物理直连相对 URL
-                    ch_copy["path"] = cleaned_path
-                else:
-                    # 域名访问下也使用不带域名的相对中转链接，由客户端 JS 拼接网关地址，过 WAF 破盾秒开
-                    ch_copy["path"] = f"/api.php/Book/getRealContent?url={cleaned_path}"
+                # 统一还原为最纯粹、最原始的原站相对路径，交由阅读 APP 客户端直接进行物理直连和本地解析，不走任何服务端正文代理中转
+                ch_copy["path"] = cleaned_path
                 
                 final_chapters.append(ch_copy)
             except Exception:
