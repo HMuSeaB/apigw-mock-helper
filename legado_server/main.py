@@ -367,98 +367,52 @@ async def get_resources(request: Request):
         # 开启国防级全局双向 ID 智能自愈与对齐系统 (支持数据库物理级别自愈 + 内存缓存加速)
         book_name = book_detail.get("book_name", "").strip()
         book_author = book_detail.get("book_author", "").strip()
-        aligned_bq_raw_id = raw_id
-        aligned_bq_pref = pref
-        aligned_69_raw_id = raw_id
 
         # A. 优先从 SQLite sheets 数据库中拉取固化物理对齐 ID
         db_aligned_bq_id = ""
-        db_aligned_69_id = ""
         try:
             with sqlite3.connect(DB_FILE) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT aligned_bq_id, aligned_69_id FROM sheets WHERE book_id = ?", (book_id,))
+                cursor.execute("SELECT aligned_bq_id FROM sheets WHERE book_id = ?", (book_id,))
                 row = cursor.fetchone()
                 if row:
                     db_aligned_bq_id = row[0] or ""
-                    db_aligned_69_id = row[1] or ""
         except Exception as db_err:
             logger.warning(f"⚠️ [align] 读取 SQLite 物理对齐 ID 异常: {str(db_err)}")
 
-        if db_aligned_bq_id and db_aligned_69_id:
-            logger.info(f"🎯 [align] 成功从 SQLite 提取固化物理对齐 ID: bq='{db_aligned_bq_id}', 69='{db_aligned_69_id}'")
-            aligned_bq_raw_id = db_aligned_bq_id
-            aligned_69_raw_id = db_aligned_69_id
+        # B. 多源全局高并发高精度物理对齐
+        import concurrent.futures
+        
+        # 1. 提取当前主源的默认 raw_id_default 和 pref_default 供对齐失败兜底使用
+        raw_id_default = raw_id
+        pref_default = pref
+        if db_aligned_bq_id:
+            raw_id_default = db_aligned_bq_id
             try:
-                val_id = int(aligned_bq_raw_id)
-                aligned_bq_pref = str(val_id // 1000)
+                val_id = int(raw_id_default)
+                pref_default = str(val_id // 1000)
             except ValueError:
-                aligned_bq_pref = "0"
-        else:
-            # B. 降级走内存缓存与网络动态自愈
-            if not book_id.startswith("69_"):
-                # 主源为笔趣阁类，其本身的 ID 体系代表笔趣阁 ID，我们要去检索 69 书吧 ID 以供换源 69 时使用
-                aligned_bq_raw_id = raw_id
-                aligned_bq_pref = pref
-                cache_key = f"{book_name}_69"
-                if cache_key in ID_ALIGNMENT_CACHE:
-                    aligned_69_raw_id = ID_ALIGNMENT_CACHE[cache_key]
-                else:
-                    try:
-                        if book_name:
-                            logger.info(f"🔄 [align] 正在为笔趣阁主源智能检索 69 书吧对齐 ID: '{book_name}'")
-                            from sources import shuba69
-                            search_results = shuba69.crawl_search(book_name)
-                            for b in search_results:
-                                if b.get("book_name", "").strip() == book_name:
-                                    b_id = b.get("book_id", "")
-                                    if b_id.startswith("69_"):
-                                        aligned_69_raw_id = b_id.replace("69_", "")
-                                        ID_ALIGNMENT_CACHE[cache_key] = aligned_69_raw_id
-                                        logger.info(f"🎯 [align] 成功将笔趣阁 ID '{raw_id}' 对齐至 69 书吧真实 ID '{aligned_69_raw_id}'！")
-                                        break
-                    except Exception as align_err:
-                        logger.warning(f"⚠️ [align] 检索 69 书吧对齐 ID 发生异常: {str(align_err)}")
-            else:
-                # 主源为 69 书吧，其本身的 ID 体系代表 69 书吧 ID，我们要去检索笔趣阁 ID 以供换源备用源时使用
-                aligned_69_raw_id = raw_id
-                cache_key = f"{book_name}_bq"
-                if cache_key in ID_ALIGNMENT_CACHE:
-                    aligned_bq_raw_id = ID_ALIGNMENT_CACHE[cache_key]
-                    try:
-                        val_id = int(aligned_bq_raw_id)
-                        aligned_bq_pref = str(val_id // 1000)
-                    except ValueError:
-                        aligned_bq_pref = "0"
-                else:
-                    try:
-                        if book_name:
-                            logger.info(f"🔄 [align] 正在为 69 书吧主源智能检索笔趣阁对齐 ID: '{book_name}'")
-                            search_results = bqg78.crawl_search(book_name)
-                            for b in search_results:
-                                if b.get("book_name", "").strip() == book_name:
-                                    bq_id = b.get("book_id", "")
-                                    if bq_id.startswith("bqg78_"):
-                                        aligned_bq_raw_id = bq_id.replace("bqg78_", "")
-                                        ID_ALIGNMENT_CACHE[cache_key] = aligned_bq_raw_id
-                                        try:
-                                            val_id = int(aligned_bq_raw_id)
-                                            aligned_bq_pref = str(val_id // 1000)
-                                        except ValueError:
-                                            aligned_bq_pref = "0"
-                                        logger.info(f"🎯 [align] 成功将 69 书吧 ID '{raw_id}' 对齐至笔趣阁真实 ID '{aligned_bq_raw_id}' (pref={aligned_bq_pref})！")
-                                        break
-                    except Exception as align_err:
-                        logger.warning(f"⚠️ [align] 检索笔趣阁对齐 ID 发生异常: {str(align_err)}")
+                pass
 
-        # 检测是否为带端口的 IP 访问，规避手机客户端对于端口号冒号的正则匹配闪退缺陷
-        host = request.headers.get("host", "")
-        is_port_access = ":" in host
-        logger.info(f"🔍 访问模式检测: host={host}, is_port_access={is_port_access}")
+        # 2. 开启多线程并行并发去各大备用源嗅探对齐 ID (已对 SQLite 缓存进行防并发穿透优化，并设 3.5s 保护超时)
+        aligned_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_domain = {
+                executor.submit(find_aligned_id, res.get("sourceName", "").lower(), book_name, raw_id_default, pref_default): res.get("sourceName", "").lower()
+                for res in EXTERNAL_RESOURCES
+            }
+            try:
+                for future in concurrent.futures.as_completed(future_to_domain, timeout=3.5):
+                    domain_key = future_to_domain[future]
+                    try:
+                        aligned_results[domain_key] = future.result()
+                    except Exception as e:
+                        logger.warning(f"⚠️ [align] 并发对齐备用源 {domain_key} 时抛出异常: {e}")
+            except concurrent.futures.TimeoutError:
+                logger.warning("⚠️ [align] 部分备用源并发对齐任务超时，未返回的已自动降级为主源原生 ID 自适应物理兜底。")
 
-        # 2. 从本地加载并格式化 19 个全网最强小说镜像源并动态注入自愈 ID
+        # 3. 从本地加载并格式化 19 个全网最强小说镜像源并动态注入各自独有的自愈物理直连 ID
         resources_list = []
-        gateway_url = str(request.base_url).rstrip("/")
         for res in EXTERNAL_RESOURCES:
             res_copy = dict(res)
             try:
@@ -838,7 +792,7 @@ async def get_sheet(request: Request, uid: str = Header(None), token: str = Head
         return JSONResponse(content={"msg": f"服务端异常: {str(e)}", "code": -1})
 
 
-def find_aligned_id(source_domain: str, book_name: str, raw_path: str = "") -> Dict[str, str]:
+def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "673", default_pref: str = "0") -> Dict[str, str]:
     """
     通用嗅探搜寻算法：针对未对齐的备用小说域名进行精确 ID 对齐 (支持多重搜索路径、GBK/UTF-8自动编码及 302 重定向自愈)
     """
@@ -849,18 +803,8 @@ def find_aligned_id(source_domain: str, book_name: str, raw_path: str = "") -> D
     book_name = book_name.strip()
     source_domain = source_domain.strip().lower()
     
-    # 解析自适应主源原生 ID 作为备用兜底值，不使用硬编码的 673，防止错配！
-    fallback_raw_id = "673"
-    fallback_pref = "0"
-    if raw_path:
-        numbers = re.findall(r'\d+', raw_path)
-        if len(numbers) >= 2:
-            fallback_raw_id = numbers[-1]
-            fallback_pref = numbers[-2]
-        elif len(numbers) == 1:
-            fallback_raw_id = numbers[0]
-            fallback_pref = "0"
-    default_res = {"raw_id": fallback_raw_id, "pref": fallback_pref}
+    # 默认自适应主源原生 ID 兜底
+    default_res = {"raw_id": default_raw_id, "pref": default_pref}
     
     if not book_name:
         return default_res
@@ -1090,7 +1034,16 @@ async def unified_proxy(source_domain: str, path: str, request: Request):
     
     # A. 开启多源 ID 实时自愈拦截
     if real_book_name:
-        aligned = find_aligned_id(source_domain, real_book_name, path)
+        raw_id_default = "673"
+        pref_default = "0"
+        numbers = re.findall(r'\d+', path)
+        if len(numbers) >= 2:
+            raw_id_default = numbers[-1]
+            pref_default = numbers[-2]
+        elif len(numbers) == 1:
+            raw_id_default = numbers[0]
+            
+        aligned = find_aligned_id(source_domain, real_book_name, raw_id_default, pref_default)
         aligned_raw_id = aligned["raw_id"]
         aligned_pref = aligned["pref"]
         
