@@ -33,17 +33,12 @@ def get_global_align_session():
     global GLOBAL_ALIGN_SESSION
     if GLOBAL_ALIGN_SESSION is None:
         from sources.utils import get_secure_session
-        from requests.adapters import HTTPAdapter
         
         session = get_secure_session()
         # 禁止读取系统环境变量代理，防止阻断
         session.trust_env = False
         session.proxies = {"http": None, "https": None}
         
-        # 优化多线程并发连接池配置
-        adapter = HTTPAdapter(pool_connections=30, pool_maxsize=30)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
         GLOBAL_ALIGN_SESSION = session
     return GLOBAL_ALIGN_SESSION
 
@@ -323,9 +318,30 @@ async def get_book_info(request: Request):
             
         fallback_toc_url = f"https://www.bqg78.com/book/{raw_id}/"
         if book_id.startswith("69_"):
-            fallback_toc_url = f"https://www.69shuba.tw/book/{raw_id}.htm"
+            try:
+                aligned = find_aligned_id("69shuba.tw", book_name, raw_id, "0")
+                aligned_id = aligned["raw_id"]
+                fallback_toc_url = f"https://www.69shuba.tw/book/{aligned_id}.htm"
+            except Exception as e:
+                logger.warning(f"⚠️ [getBookInfo] 详情页对齐 69书吧 失败: {e}")
+                fallback_toc_url = f"https://www.69shuba.tw/book/{raw_id}.htm"
         elif book_id.startswith("xs_"):
-            fallback_toc_url = f"https://www.ibiquges.org/{pref}/{raw_id}/"
+            try:
+                aligned = find_aligned_id("ibiquges.org", book_name, raw_id, pref)
+                aligned_id = aligned["raw_id"]
+                aligned_pref = aligned["pref"]
+                fallback_toc_url = f"https://www.ibiquges.org/{aligned_pref}/{aligned_id}/"
+            except Exception as e:
+                logger.warning(f"⚠️ [getBookInfo] 详情页对齐香书小说 失败: {e}")
+                fallback_toc_url = f"https://www.ibiquges.org/{pref}/{raw_id}/"
+        elif book_id.startswith("bq_"):
+            try:
+                aligned = find_aligned_id("xbiquge.la", book_name, raw_id, "0")
+                aligned_id = aligned["raw_id"]
+                fallback_toc_url = f"https://www.xbiquge.la/book/{aligned_id}/"
+            except Exception as e:
+                logger.warning(f"⚠️ [getBookInfo] 详情页对齐新笔趣阁 失败: {e}")
+                fallback_toc_url = f"https://www.xbiquge.la/book/{raw_id}/"
         
         return JSONResponse(content={
             "msg": "Success",
@@ -446,10 +462,15 @@ async def get_resources(request: Request):
                 formatted_url = raw_url
                 
                 # 动态根据备用源站的种类，自适应拼入校正对齐后的真实物理 ID
+                domain_key = res.get("sourceName", "").lower()
+                aligned = aligned_results.get(domain_key, {"raw_id": raw_id_default, "pref": pref_default})
+                aligned_raw_id = aligned["raw_id"]
+                aligned_pref = aligned["pref"]
+                
                 if "69shuba" in res.get("sourceName", "") or "69" in res.get("sourceName", ""):
-                    formatted_url = formatted_url.replace("{raw_id}", aligned_69_raw_id).replace("{pref}", "0")
+                    formatted_url = formatted_url.replace("{raw_id}", aligned_raw_id).replace("{pref}", "0")
                 else:
-                    formatted_url = formatted_url.replace("{raw_id}", aligned_bq_raw_id).replace("{pref}", aligned_bq_pref)
+                    formatted_url = formatted_url.replace("{raw_id}", aligned_raw_id).replace("{pref}", aligned_pref)
                 
                 # 动态把书名 and 作者通过 urllib.parse.quote 编码成 Query 参数，强行附在链接尾部，确保切源时网关能智能自愈！
                 import urllib.parse
