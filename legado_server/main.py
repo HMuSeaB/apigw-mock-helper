@@ -26,6 +26,27 @@ DB_FILE = os.path.join(os.path.dirname(__file__), "legado.db")
 # 全局多源 ID 智能自愈与对齐缓存字典 (书名 -> {源站: ID})
 ID_ALIGNMENT_CACHE = {}
 
+# 全局高复用并发网络连接会话 (复用 TCP 长连接池，禁止系统代理，以提速多线程并发嗅探并降低源站开销)
+GLOBAL_ALIGN_SESSION = None
+
+def get_global_align_session():
+    global GLOBAL_ALIGN_SESSION
+    if GLOBAL_ALIGN_SESSION is None:
+        from sources.utils import get_secure_session
+        from requests.adapters import HTTPAdapter
+        
+        session = get_secure_session()
+        # 禁止读取系统环境变量代理，防止阻断
+        session.trust_env = False
+        session.proxies = {"http": None, "https": None}
+        
+        # 优化多线程并发连接池配置
+        adapter = HTTPAdapter(pool_connections=30, pool_maxsize=30)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        GLOBAL_ALIGN_SESSION = session
+    return GLOBAL_ALIGN_SESSION
+
 # 全局正文中转模式开关 (False 表示不走中转直接 302 重定向直连原站，True 表示走服务端中转中介清洗)
 PROXY_CONTENT_DELIVERY = True
 
@@ -798,7 +819,6 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
     """
     import urllib.parse
     import re
-    from sources.utils import get_secure_session
     
     book_name = book_name.strip()
     source_domain = source_domain.strip().lower()
@@ -808,22 +828,32 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
     
     if not book_name:
         return default_res
+
+    # 1. 优先从内存缓存中高速读取
+    cache_key = f"{book_name}_{source_domain}"
+    if cache_key in ID_ALIGNMENT_CACHE:
+        logger.info(f"🎯 [align] 内存缓存命中 ({source_domain}): {ID_ALIGNMENT_CACHE[cache_key]}")
+        return ID_ALIGNMENT_CACHE[cache_key]
         
     logger.info(f"🔄 [align] 开始为备用域名 '{source_domain}' 进行智能嗅探对齐 ID: 《{book_name}》 (自适应兜底: {default_res})")
     
-    # 1. 尝试从 SQLite 中读取持久化缓存
+    # 2. 其次尝试从 SQLite 中读取持久化缓存
     try:
-        with sqlite3.connect(DB_FILE) as conn:
+        # 指定 timeout=20.0 规避多线程高并发下的 sqlite3 锁冲突
+        with sqlite3.connect(DB_FILE, timeout=20.0) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT raw_id, pref FROM aligned_ids WHERE book_name = ? AND source_domain = ?", (book_name, source_domain))
             row = cursor.fetchone()
             if row:
+                res = {"raw_id": row[0], "pref": row[1]}
                 logger.info(f"🎯 [align] SQLite 缓存命中 ({source_domain}): raw_id='{row[0]}', pref='{row[1]}'")
-                return {"raw_id": row[0], "pref": row[1]}
+                # 同步回写内存缓存以便于加速下一次查询
+                ID_ALIGNMENT_CACHE[cache_key] = res
+                return res
     except Exception as e:
         logger.error(f"⚠️ [align] 读取 aligned_ids 缓存异常: {str(e)}")
         
-    # 2. 强力直派自愈拦截分支：
+    # 3. 强力直派自愈拦截分支：
     # A. 针对香书小说精准派发
     if "ibiquges" in source_domain:
         try:
@@ -839,9 +869,11 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                             raw_id = parts[1]
                             pref = parts[0]
                             logger.info(f"🎯 [align] [direct] 香书小说独立子模块对齐成功: raw_id='{raw_id}', pref='{pref}'")
-                            # 写入 SQLite 缓存
+                            res = {"raw_id": raw_id, "pref": pref}
+                            # 同步写入内存缓存与 SQLite 缓存
+                            ID_ALIGNMENT_CACHE[cache_key] = res
                             try:
-                                with sqlite3.connect(DB_FILE) as conn:
+                                with sqlite3.connect(DB_FILE, timeout=20.0) as conn:
                                     cursor = conn.cursor()
                                     cursor.execute(
                                         "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
@@ -850,7 +882,7 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                                     conn.commit()
                             except Exception as db_err:
                                 logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
-                            return {"raw_id": raw_id, "pref": pref}
+                            return res
         except Exception as align_err:
             logger.warning(f"⚠️ [align] [direct] 调度香书小说对齐发生异常: {str(align_err)}")
 
@@ -867,9 +899,11 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                         raw_id = b_id.replace("69_", "")
                         pref = "0"
                         logger.info(f"🎯 [align] [direct] 69书吧独立子模块对齐成功: raw_id='{raw_id}', pref='{pref}'")
-                        # 写入 SQLite 缓存
+                        res = {"raw_id": raw_id, "pref": pref}
+                        # 同步写入内存缓存与 SQLite 缓存
+                        ID_ALIGNMENT_CACHE[cache_key] = res
                         try:
-                            with sqlite3.connect(DB_FILE) as conn:
+                            with sqlite3.connect(DB_FILE, timeout=20.0) as conn:
                                 cursor = conn.cursor()
                                 cursor.execute(
                                     "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
@@ -878,11 +912,11 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                                 conn.commit()
                         except Exception as db_err:
                             logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
-                        return {"raw_id": raw_id, "pref": pref}
+                        return res
         except Exception as align_err:
             logger.warning(f"⚠️ [align] [direct] 调度 69书吧对齐发生异常: {str(align_err)}")
 
-    # 3. 从 sources.json 获取该域名对应的 chapterPageUrl 正则匹配模板
+    # 4. 从 sources.json 获取该域名对应的 chapterPageUrl 正则匹配模板
     id_regex = r'/book/(?P<raw_id>\d+)/' # 默认
     chapter_page_url_tpl = ""
     for res in EXTERNAL_RESOURCES:
@@ -891,29 +925,21 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
             break
             
     if chapter_page_url_tpl:
-        # 将 chapterPageUrl 转换为用于提取 ID 的正则表达式
-        # 比如 `{gateway_url}/proxy/www.43kanshu.com/book/{raw_id}/` -> `book/(?P<raw_id>\d+)/`
         path_part = chapter_page_url_tpl
         if "/proxy/" in path_part:
             path_part = path_part.split("/proxy/")[1]
-            path_part = "/".join(path_part.split("/")[1:]) # 去掉域名部分，保留相对路径部分
+            path_part = "/".join(path_part.split("/")[1:])
         
-        # 将 {raw_id} 和 {pref} 转换为正则捕获组
         regex_str = re.escape(path_part)
         regex_str = regex_str.replace(r'\{raw_id\}', r'(?P<raw_id>\d+)').replace(r'\{pref\}', r'(?P<pref>\d+)')
-        # 兼容可能有斜杠或无斜杠
         regex_str = regex_str.replace(r'\/', r'*(?:/)?')
         id_regex = regex_str
         logger.info(f"🔍 [align] 根据配置模板自适应编译出 ID 提取正则表达式: '{id_regex}'")
 
-    session = get_secure_session()
-    # 禁用系统代理防 CF IP 阻断 400
-    session.trust_env = False
-    session.proxies = {"http": None, "https": None}
+    # 5. 复用全局唯一 Session 连接池
+    session = get_global_align_session()
     
-    # 杰奇/笔趣阁系统经典搜索路由和参数类型列表
     search_paths = [
-        # (搜索路径, 参数名, 是否强转 GBK)
         ("/modules/article/search.php", "searchkey", True),
         ("/search.php", "searchkey", True),
         ("/search.php", "keyword", True),
@@ -935,7 +961,6 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
             search_url = f"https://{source_domain}{path}?{param_name}={quoted_keyword}"
             logger.info(f"🕸️ [align] 尝试通用嗅探搜索: {search_url} (编码: {encoding})")
             
-            # 注入高级伪装请求头以成功绕过 43看书网等站点的 WAF 403 阻断防护
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": f"https://{source_domain}/",
@@ -946,7 +971,6 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
             response = session.get(search_url, headers=headers, timeout=6, allow_redirects=True)
             
             if response.status_code == 200:
-                # 检查是否直接 302 到了小说详情页
                 final_url = str(response.url)
                 logger.info(f"🕸️ [align] 搜索请求最终响应 URL: {final_url}")
                 
@@ -957,9 +981,10 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                     pref = groups.get("pref", "0")
                     if raw_id:
                         logger.info(f"🎯 [align] 通过 302 重定向成功精准对齐 ID! raw_id='{raw_id}', pref='{pref}'")
-                        # 写入 SQLite
+                        res = {"raw_id": raw_id, "pref": pref}
+                        ID_ALIGNMENT_CACHE[cache_key] = res
                         try:
-                            with sqlite3.connect(DB_FILE) as conn:
+                            with sqlite3.connect(DB_FILE, timeout=20.0) as conn:
                                 cursor = conn.cursor()
                                 cursor.execute(
                                     "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
@@ -968,9 +993,8 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                                 conn.commit()
                         except Exception as db_err:
                             logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
-                        return {"raw_id": raw_id, "pref": pref}
+                        return res
                 
-                # 如果没有重定向，而是在页面中返回了列表超链接，自动匹配
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "gbk" in content_type or "gb2312" in content_type:
                     response.encoding = "gbk"
@@ -978,7 +1002,6 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                     response.encoding = "utf-8"
                 
                 html = response.text
-                # 匹配所有常规 <a> 超链接
                 links = re.findall(r'href=["\']([^"\']+)["\'][^>]*>([^<]*)</a>', html, re.I)
                 for href, text in links:
                     text_clean = text.strip().replace(" ", "").lower()
@@ -991,9 +1014,10 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                             pref = groups.get("pref", "0")
                             if raw_id:
                                 logger.info(f"🎯 [align] 通过列表 HTML 超链接分析成功对齐 ID! href='{href}', raw_id='{raw_id}', pref='{pref}'")
-                                # 写入 SQLite
+                                res = {"raw_id": raw_id, "pref": pref}
+                                ID_ALIGNMENT_CACHE[cache_key] = res
                                 try:
-                                    with sqlite3.connect(DB_FILE) as conn:
+                                    with sqlite3.connect(DB_FILE, timeout=20.0) as conn:
                                         cursor = conn.cursor()
                                         cursor.execute(
                                             "INSERT OR REPLACE INTO aligned_ids (book_name, source_domain, raw_id, pref) VALUES (?, ?, ?, ?)",
@@ -1002,7 +1026,7 @@ def find_aligned_id(source_domain: str, book_name: str, default_raw_id: str = "6
                                         conn.commit()
                                 except Exception as db_err:
                                     logger.error(f"⚠️ [align] 写入对齐缓存表异常: {db_err}")
-                                return {"raw_id": raw_id, "pref": pref}
+                                return res
             else:
                 logger.warning(f"⚠️ [align] 搜索响应状态码不正确: {response.status_code}")
         except Exception as ex:
